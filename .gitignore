@@ -1,0 +1,48 @@
+# Локальные переменные окружения (кроме примера)
+.env
+.env.*
+!.env.example
+
+# Логи
+*.log
+logs/
+
+# Локальные данные PostgreSQL
+postgres-data/
+data/postgres/
+
+# Локальные данные Docker Registry
+registry-data/
+data/registry/
+
+# Локальные данные pgAdmin
+pgadmin-data/
+
+# Docker Registry Basic Auth: реальные учётные данные не попадают в git,
+# в репозитории остаётся только пустая директория (.gitkeep)
+registry/auth/*
+!registry/auth/.gitkeep
+
+# TLS-сертификаты и приватные ключи
+nginx/certs/*
+!nginx/certs/.gitkeep
+*.pem
+*.key
+*.crt
+*.csr
+
+# ACME challenge — временные файлы верификации, не коммитим
+nginx/acme-challenge/*
+!nginx/acme-challenge/.gitkeep
+
+# Служебные директории IDE
+.vscode/
+.idea/
+.claude/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/

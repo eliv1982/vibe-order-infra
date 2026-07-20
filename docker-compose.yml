@@ -1,0 +1,289 @@
+# vibe-order-infra
+#
+# Учебная инфраструктура сайта приёма и обработки клиентских заявок.
+# Compose Specification (без устаревшего поля "version").
+#
+# ВАЖНО: этот файл предназначен для запуска на Ubuntu 24.04 VPS,
+# где UFW открыт только на 22/80/443. Сам файл здесь не запускается.
+#
+# Все обязательные переменные окружения используют форму ${VAR:?...} —
+# `docker compose config`/`up` откажется стартовать без .env с реальными
+# значениями вместо того, чтобы молча подставить пустую строку.
+
+services:
+
+  # ------------------------------------------------------------------
+  # PostgreSQL — база данных заявок.
+  # Порт 5432 НЕ публикуется на host: доступ только изнутри app-net
+  # (pgAdmin и в будущем backend обращаются к сервису по имени "postgres").
+  # ------------------------------------------------------------------
+  postgres:
+    image: postgres:16.14-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:?POSTGRES_USER must be set}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
+      POSTGRES_DB: "${POSTGRES_DB:?POSTGRES_DB must be set}"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - app-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?POSTGRES_USER must be set} -d ${POSTGRES_DB:?POSTGRES_DB must be set}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # Ресурсы: PostgreSQL получает самую большую долю из ~1GB VPS
+    # намеренно — агрессивное ограничение СУБД без обоснования может
+    # приводить к OOM-убийству под нагрузкой (см. README, раздел
+    # "Resource protection").
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 384M
+        reservations:
+          memory: 192M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Watchtower явно запрещён (opt-in по label не выставлен = false):
+    # обновление СУБД должно быть осознанным ручным действием.
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+
+  # ------------------------------------------------------------------
+  # pgAdmin — веб-интерфейс администрирования PostgreSQL.
+  # Не публикуется в интернет: порт привязан только к 127.0.0.1,
+  # доступ с локального компьютера — через SSH-туннель. Опционален
+  # (профиль "admin"), чтобы не расходовать RAM на VPS с ~1GB постоянно.
+  #
+  #   docker compose --profile admin up -d pgadmin
+  #   ssh -L 5050:127.0.0.1:5050 <user>@<vps-host>
+  #   -> открыть http://127.0.0.1:5050 в браузере на локальной машине
+  # ------------------------------------------------------------------
+  pgadmin:
+    image: dpage/pgadmin4:9.16
+    restart: unless-stopped
+    profiles:
+      - admin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: "${PGADMIN_DEFAULT_EMAIL:?PGADMIN_DEFAULT_EMAIL must be set}"
+      PGADMIN_DEFAULT_PASSWORD: "${PGADMIN_DEFAULT_PASSWORD:?PGADMIN_DEFAULT_PASSWORD must be set}"
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    ports:
+      # Только loopback! Публикация на 0.0.0.0 обходила бы UFW.
+      - "127.0.0.1:5050:80"
+    networks:
+      - app-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+        reservations:
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Watchtower явно запрещён (opt-in по label не выставлен = false):
+    # обновление админ-панели с доступом к БД не должно происходить
+    # без контроля.
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+
+  # ------------------------------------------------------------------
+  # Docker Registry — приватный реестр образов.
+  # Порт 5000 НЕ публикуется на host. Доступен Nginx внутри proxy-net.
+  # Внешний доступ в будущем — только через Nginx по HTTPS
+  # (registry-vibe.elivcloud.org). Basic Auth обеспечивается самим
+  # Registry через htpasswd. Registry НЕ считается готовым к запуску,
+  # пока registry/auth/htpasswd не создан через registry/create-user.sh
+  # (см. README, "Порядок первого деплоя") — без него контейнер
+  # стартует, но ни один запрос не пройдёт аутентификацию.
+  # ------------------------------------------------------------------
+  # Совместимость с registry:3.1.1 (CNCF distribution) проверена по
+  # официальной документации перед апгрейдом с registry:2.x:
+  #   - REGISTRY_AUTH / REGISTRY_AUTH_HTPASSWD_REALM / REGISTRY_AUTH_HTPASSWD_PATH
+  #     — конвенция REGISTRY_<SECTION>_<KEY> и bcrypt-only htpasswd не изменились;
+  #   - default storage path /var/lib/registry не изменился;
+  #   - default config.yml переехал на /etc/distribution/config.yml, но
+  #     мы его не монтируем (только env var overrides), поэтому это не влияет;
+  #   - CLI-утилита htpasswd убрана ИЗ ОБРАЗА registry — не проблема:
+  #     registry/create-user.sh использует htpasswd с хоста (apache2-utils),
+  #     а не `docker run --entrypoint htpasswd registry ...`.
+  registry:
+    image: registry:3.1.1
+    restart: unless-stopped
+    environment:
+      REGISTRY_AUTH: htpasswd
+      REGISTRY_AUTH_HTPASSWD_REALM: Registry Realm
+      REGISTRY_AUTH_HTPASSWD_PATH: /auth/htpasswd
+    volumes:
+      - registry-data:/var/lib/registry
+      - ./registry/auth:/auth:ro
+    networks:
+      - proxy-net
+    # Здоровье не проверяем автоматически: с включённым htpasswd-auth
+    # "/v2/" без креденшлов отвечает 401, что дало бы ложное "unhealthy",
+    # а отдельного анонимного health-эндпоинта у образа registry нет.
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 192M
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Watchtower: opt-in по label ПОКА выключен (см. пункт 4 отчёта
+    # ревью) — Registry обновляется вручную, контролируемо.
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+
+  # ------------------------------------------------------------------
+  # Nginx — единственный публичный сервис (80/443).
+  # Reverse proxy для vibe.elivcloud.org и (после выпуска TLS)
+  # registry-vibe.elivcloud.org -> registry. Сейчас backend отсутствует,
+  # поэтому активная конфигурация не содержит proxy_pass на backend.
+  # ------------------------------------------------------------------
+  nginx:
+    image: nginx:1.30.4-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/acme-challenge:/var/www/acme-challenge:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    networks:
+      - proxy-net
+    depends_on:
+      - registry
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:80/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 96M
+        reservations:
+          memory: 32M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Watchtower: opt-in по label ПОКА выключен (см. пункт 4 отчёта
+    # ревью) — единственный публичный сервис обновляется вручную,
+    # контролируемо, а не по ночному расписанию.
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+
+  # ------------------------------------------------------------------
+  # Watchtower — присутствует и настроен в label-based opt-in режиме
+  # (WATCHTOWER_LABEL_ENABLE=true), но на данном этапе НИ У ОДНОГО
+  # инфраструктурного контейнера label не включён (все
+  # com.centurylinklabs.watchtower.enable=false) — Watchtower ничего
+  # не обновляет автоматически. Это осознанное production-like
+  # решение (см. README, "Watchtower"), а не недосмотр: opt-in
+  # предполагается включать точечно в будущем, в первую очередь для
+  # stateless backend, а не для СУБД/Registry/Nginx/админ-сервисов.
+  # Портов не публикует. Требует доступ к docker.sock — см. README
+  # про связанные риски.
+  #
+  # Образ: nickfedor/watchtower, НЕ containrrr/watchtower — оригинальный
+  # containrrr/watchtower заархивирован (read-only с 2025-12-17) и не
+  # запускается на Docker Engine 29 ("client version 1.25 is too old").
+  # nickfedor/watchtower — поддерживаемый форк, совместимость env vars
+  # проверена перед апгрейдом (см. README, "Watchtower"): все
+  # используемые переменные ниже (WATCHTOWER_LABEL_ENABLE,
+  # WATCHTOWER_CLEANUP, WATCHTOWER_POLL_INTERVAL) задокументированы для
+  # nickfedor/watchtower с теми же именами, типами и значениями по
+  # умолчанию — изменений в environment/command не потребовалось.
+  # ------------------------------------------------------------------
+  watchtower:
+    image: nickfedor/watchtower:1.19.0
+    restart: unless-stopped
+    environment:
+      WATCHTOWER_LABEL_ENABLE: "true"
+      WATCHTOWER_CLEANUP: "true"
+      # Не обязательная переменная: есть безопасное значение по
+      # умолчанию (86400с = раз в сутки), поэтому ${VAR:-default},
+      # а не ${VAR:?...}.
+      WATCHTOWER_POLL_INTERVAL: "${WATCHTOWER_POLL_INTERVAL:-86400}"
+    volumes:
+      # :ro не ограничивает Docker API через сокет (см. README) —
+      # это лишь запрет на замену самого файла сокета.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+        reservations:
+          memory: 32M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Сам Watchtower себя не обновляет: label намеренно не выставлен,
+    # версия обновляется вручную.
+
+  # ------------------------------------------------------------------
+  # Backend — пока НЕ реализован. Архитектурная заглушка.
+  # Когда появится: build/image + сеть app-net (доступ к postgres по
+  # внутреннему имени сервиса "postgres") + proxy-net (чтобы Nginx мог
+  # проксировать запросы). Watchtower opt-in для backend — разумный
+  # первый кандидат на автообновление (stateless, легко пересоздать),
+  # в отличие от постоянно включённого label для СУБД/Registry/Nginx.
+  # Пример:
+  #
+  # backend:
+  #   build: ./backend
+  #   restart: unless-stopped
+  #   networks:
+  #     - app-net
+  #     - proxy-net
+  #   environment:
+  #     DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #   labels:
+  #     com.centurylinklabs.watchtower.enable: "true"
+  # ------------------------------------------------------------------
+
+networks:
+  # Внешний контур: Nginx + Registry. Наружу торчит только Nginx (80/443),
+  # Registry внутри этой сети доступен Nginx, но не публикуется на host.
+  proxy-net:
+    driver: bridge
+  # Внутренняя сеть приложения: PostgreSQL + pgAdmin (+ будущий backend).
+  # Не имеет точки входа снаружи, кроме опционального loopback-порта pgAdmin.
+  app-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  pgadmin-data:
+  registry-data:
