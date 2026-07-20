@@ -155,9 +155,15 @@ services:
 
   # ------------------------------------------------------------------
   # Nginx — единственный публичный сервис (80/443).
-  # Reverse proxy для vibe.elivcloud.org и (после выпуска TLS)
-  # registry-vibe.elivcloud.org -> registry. Сейчас backend отсутствует,
-  # поэтому активная конфигурация не содержит proxy_pass на backend.
+  # HTTPS-блоки для vibe.elivcloud.org и registry-vibe.elivcloud.org
+  # активированы в конфигурации (сертификат Let's Encrypt уже выпущен
+  # на VPS и монтируется из /etc/letsencrypt, см. volumes ниже) — но
+  # реальный serverside smoke-test (docker compose up + curl с VPS)
+  # ещё не проводился в рамках этой сессии. HTTP (80) отдаёт ACME
+  # challenge и редиректит остальной трафик на HTTPS для обоих
+  # доменов. Registry проксируется только по HTTPS. Backend всё ещё
+  # отсутствует, поэтому у vibe.elivcloud.org на 443 — тот же
+  # безопасный placeholder, что и был на HTTP.
   # ------------------------------------------------------------------
   nginx:
     image: nginx:1.30.4-alpine
@@ -170,6 +176,12 @@ services:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
       - ./nginx/acme-challenge:/var/www/acme-challenge:ro
       - ./nginx/certs:/etc/nginx/certs:ro
+      # Реальные TLS-сертификаты Let's Encrypt — читаем напрямую с VPS,
+      # НЕ копируем в репозиторий и НЕ кладём в ./nginx/certs (см. README).
+      # Один сертификат покрывает vibe.elivcloud.org и
+      # registry-vibe.elivcloud.org (SAN), физически лежит только под
+      # /etc/letsencrypt/live/vibe.elivcloud.org/ на хосте.
+      - /etc/letsencrypt:/etc/letsencrypt:ro
     networks:
       - proxy-net
     depends_on:
