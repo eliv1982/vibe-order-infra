@@ -1,0 +1,9 @@
+# Автоопределение текстовых файлов Git'ом + нормализация до LF в репозитории.
+* text=auto
+
+*.sh        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.conf      text eol=lf
+*.md        text eol=lf
+.env.example text eol=lf
