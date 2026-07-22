@@ -408,9 +408,21 @@ ul {
 
 .services-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  grid-template-columns: 1fr;
   gap: 20px;
   margin-bottom: 32px;
+}
+
+@media (min-width: 641px) {
+  .services-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (min-width: 960px) {
+  .services-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
 }
 
 .service-card {
@@ -427,7 +439,9 @@ ul {
 }
 
 .service-card-body {
-  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  padding: 28px 26px;
   border-radius: var(--radius-md);
   border: 1.5px solid var(--color-border-soft);
   background: var(--color-surface-soft);
@@ -438,14 +452,43 @@ ul {
   height: 100%;
 }
 
-.service-card h3 {
-  font-size: 1.05rem;
-  margin-bottom: 8px;
+/* Text badge shown on the selected card in addition to the color/shadow
+   change below — selection must be perceivable without relying on color
+   alone (WCAG 1.4.1). Purely visual (aria-hidden): the native radio's own
+   checked state is already announced to assistive tech regardless. */
+.service-card-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--color-gold-dark);
+  opacity: 0;
+  transform: translateY(-4px);
+  transition:
+    opacity 0.2s ease,
+    transform 0.2s ease;
+  margin-bottom: 6px;
 }
 
-.service-card p {
+.service-card h3 {
+  font-size: 1.15rem;
+  margin-bottom: 10px;
+  overflow-wrap: break-word;
+}
+
+.service-card-desc {
   font-size: 0.9rem;
   color: var(--color-text-muted);
+  margin-bottom: 16px;
+  flex: 1;
+}
+
+.service-card-budget {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--color-gold-dark);
+  margin-top: auto;
 }
 
 .service-card:hover .service-card-body {
@@ -457,6 +500,11 @@ ul {
   border-color: var(--color-gold);
   background: var(--color-gold-bg);
   box-shadow: var(--shadow-md);
+}
+
+.service-card input[type='radio']:checked + .service-card-body .service-card-badge {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .service-card input[type='radio']:focus-visible + .service-card-body {
@@ -542,8 +590,71 @@ ul {
 }
 
 /* ==========================================================================
+   Application summary ("Ваша заявка") — sits directly above the form card
+   so the selected service/budget stay in view while filling the form.
+   ========================================================================== */
+
+.application-summary {
+  padding: 22px 28px;
+  margin-bottom: 20px;
+}
+
+.application-summary-empty p {
+  color: var(--color-text-muted);
+  margin-block: 10px 16px;
+}
+
+.application-summary-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.application-summary-filled h3 {
+  font-size: 1.15rem;
+  margin-bottom: 6px;
+}
+
+.application-summary-desc {
+  color: var(--color-text-muted);
+  font-size: 0.92rem;
+  margin-bottom: 10px;
+}
+
+.application-summary-budget {
+  font-size: 1rem;
+}
+
+.application-summary-budget strong {
+  color: var(--color-gold-dark);
+}
+
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--color-gold-dark);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.link-button:hover {
+  color: var(--color-gold);
+}
+
+/* ==========================================================================
    Forms
    ========================================================================== */
+
+.container--wide {
+  max-width: 1200px;
+}
 
 .form-card {
   padding: clamp(24px, 3vw, 48px);

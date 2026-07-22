@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { isServiceIdInList, serviceCardTemplate } from './home';
+import {
+  applicationSummaryTemplate,
+  homeTemplate,
+  isServiceIdInList,
+  serviceCardTemplate,
+} from './home';
 import { viewCardTemplate } from './admin';
 import type { AdminSettingRead } from '../api/types';
+import { formatBudget } from '../utils/format';
 
 function makeService(overrides: Partial<AdminSettingRead> = {}): AdminSettingRead {
   return {
@@ -55,5 +61,57 @@ describe('isServiceIdInList', () => {
 
   it('returns false for an empty active list', () => {
     expect(isServiceIdInList([], 1)).toBe(false);
+  });
+});
+
+describe('serviceCardTemplate — full name/description rendering', () => {
+  it('renders a long service name in full, without a truncation class', () => {
+    const longName =
+      'Комплексная керамическая защита кузова, дисков и салона автомобиля премиум-класса';
+    const html = serviceCardTemplate(makeService({ service_name: longName }));
+    expect(html).toContain(longName);
+    expect(html).not.toMatch(/line-clamp|truncate|text-overflow/);
+  });
+
+  it('renders the service description on the card, in full', () => {
+    const longDesc =
+      'Ручная многоэтапная полировка с нанесением защитного керамического слоя и полировкой фар';
+    const html = serviceCardTemplate(makeService({ description: longDesc }));
+    expect(html).toContain(longDesc);
+  });
+});
+
+describe('applicationSummaryTemplate', () => {
+  const service = makeService({
+    service_name: 'Керамическое покрытие',
+    description: 'Защита кузова на 2 года',
+  });
+
+  it('shows the selected service name, description, budget, and a way back to the services section', () => {
+    const html = applicationSummaryTemplate(service, 250_000);
+    expect(html).toContain('Керамическое покрытие');
+    expect(html).toContain('Защита кузова на 2 года');
+    expect(html).toContain(formatBudget(250_000));
+    expect(html).toContain('data-action="change-service"');
+  });
+
+  it('updates the displayed budget when the budget changes', () => {
+    const cheaper = applicationSummaryTemplate(service, 100_000);
+    const pricier = applicationSummaryTemplate(service, 300_000);
+    expect(cheaper).not.toBe(pricier);
+    expect(cheaper).toContain(formatBudget(100_000));
+    expect(pricier).toContain(formatBudget(300_000));
+  });
+
+  it('prompts the user to choose a service first, instead of looking like an independent form', () => {
+    const html = applicationSummaryTemplate(null, 0);
+    expect(html).toContain('выберите услугу');
+    expect(html).not.toContain('data-action="change-service"');
+  });
+});
+
+describe('homeTemplate — public navigation', () => {
+  it('never links to /admin from the public client page', () => {
+    expect(homeTemplate()).not.toContain('/admin');
   });
 });
