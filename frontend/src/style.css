@@ -660,6 +660,23 @@ ul {
   padding: clamp(24px, 3vw, 48px);
 }
 
+/* Soft appearance once a service is selected; prefers-reduced-motion is
+   handled globally (see the *,*::before,*::after rule near the top). */
+.form-card--enter {
+  animation: form-card-fade-in 0.35s ease-out;
+}
+
+@keyframes form-card-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 fieldset {
   border: none;
   padding: 0;

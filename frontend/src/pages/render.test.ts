@@ -115,3 +115,16 @@ describe('homeTemplate — public navigation', () => {
     expect(homeTemplate()).not.toContain('/admin');
   });
 });
+
+describe('homeTemplate — form card hidden until a service is selected', () => {
+  it('renders the form card with the hidden attribute, positioned after the application summary', () => {
+    const html = homeTemplate();
+
+    expect(html).toMatch(/<div class="card form-card" id="form-card" hidden>/);
+
+    const summaryIndex = html.indexOf('id="application-summary"');
+    const formCardIndex = html.indexOf('id="form-card"');
+    expect(summaryIndex).toBeGreaterThan(-1);
+    expect(formCardIndex).toBeGreaterThan(summaryIndex);
+  });
+});

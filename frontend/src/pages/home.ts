@@ -105,7 +105,7 @@ export function homeTemplate(): string {
 
         <div class="card application-summary" id="application-summary" aria-live="polite"></div>
 
-        <div class="card form-card">
+        <div class="card form-card" id="form-card" hidden>
           <div id="form-banner" role="status" aria-live="polite"></div>
           <form id="application-form-el" novalidate>
             ${applicationFormFieldsTemplate()}
@@ -337,6 +337,30 @@ function renderApplicationSummary(root: HTMLElement, state: HomeState): void {
   summaryEl.innerHTML = applicationSummaryTemplate(state.selectedService, state.selectedBudget);
 }
 
+/**
+ * The form only makes sense once a service is selected (its payload needs
+ * interested_product/budget from that service) — keep it hidden until then,
+ * and re-hide it if the service is cleared (e.g. deactivated at submit time).
+ * The fade-in class is only (re-)added on an actual hidden→visible flip, so
+ * unrelated re-renders (budget slider input) don't replay the animation.
+ */
+function setFormCardVisible(root: HTMLElement, visible: boolean): void {
+  const formCardEl = root.querySelector<HTMLElement>('#form-card');
+  if (!formCardEl) return;
+
+  if (visible) {
+    if (!formCardEl.hidden) return;
+    formCardEl.hidden = false;
+    formCardEl.classList.remove('form-card--enter');
+    // Force reflow so re-adding the class restarts the animation next time.
+    void formCardEl.offsetWidth;
+    formCardEl.classList.add('form-card--enter');
+  } else {
+    formCardEl.hidden = true;
+    formCardEl.classList.remove('form-card--enter');
+  }
+}
+
 function wireApplicationSummary(root: HTMLElement): void {
   const summaryEl = root.querySelector<HTMLElement>('#application-summary');
   if (!summaryEl) return;
@@ -434,6 +458,7 @@ function selectService(root: HTMLElement, state: HomeState, service: AdminSettin
   });
 
   renderApplicationSummary(root, state);
+  setFormCardVisible(root, true);
 }
 
 function wireApplicationForm(root: HTMLElement, state: HomeState): void {
@@ -494,6 +519,7 @@ async function handleSubmit(
     const detailEl = root.querySelector<HTMLElement>('#service-detail');
     if (detailEl) detailEl.hidden = true;
     renderApplicationSummary(root, state);
+    setFormCardVisible(root, false);
     await loadServices(root, state);
     document.getElementById('services')?.scrollIntoView({ behavior: 'smooth' });
     return;
