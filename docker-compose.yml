@@ -262,28 +262,45 @@ services:
     # версия обновляется вручную.
 
   # ------------------------------------------------------------------
-  # Backend — пока НЕ реализован. Архитектурная заглушка.
-  # Когда появится: build/image + сеть app-net (доступ к postgres по
-  # внутреннему имени сервиса "postgres") + proxy-net (чтобы Nginx мог
-  # проксировать запросы). Watchtower opt-in для backend — разумный
-  # первый кандидат на автообновление (stateless, легко пересоздать),
-  # в отличие от постоянно включённого label для СУБД/Registry/Nginx.
-  # Пример:
-  #
-  # backend:
-  #   build: ./backend
-  #   restart: unless-stopped
-  #   networks:
-  #     - app-net
-  #     - proxy-net
-  #   environment:
-  #     DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #   labels:
-  #     com.centurylinklabs.watchtower.enable: "true"
+  # Backend — FastAPI-приложение приёма заявок (см. backend/).
+  # Порт 8000 НЕ публикуется на host (нет "ports:") — доступен только
+  # другим контейнерам по внутреннему DNS-имени "backend" через
+  # app-net (доступ к postgres по hostname "postgres") и proxy-net
+  # (будущий proxy_pass из Nginx, пока не подключён).
   # ------------------------------------------------------------------
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:?POSTGRES_USER must be set}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
+      POSTGRES_DB: "${POSTGRES_DB:?POSTGRES_DB must be set}"
+      POSTGRES_HOST: postgres
+    networks:
+      - app-net
+      - proxy-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 192M
+        reservations:
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Watchtower пока выключен (false), как и у остальных сервисов:
+    # backend только что реализован и ещё не проходил smoke-test на
+    # VPS. После стабилизации — разумный кандидат на точечный opt-in
+    # (см. README, "Дальше по плану"): stateless-сервис безопаснее
+    # автообновлять, чем СУБД/Registry/Nginx.
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
 
 networks:
   # Внешний контур: Nginx + Registry. Наружу торчит только Nginx (80/443),

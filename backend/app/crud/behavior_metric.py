@@ -1,0 +1,77 @@
+"""Database access functions for the BehaviorMetric entity. No FastAPI/HTTP concerns here."""
+
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from app.core.exceptions import ConflictError
+from app.models.behavior_metric import BehaviorMetric
+from app.schemas.behavior_metric import BehaviorMetricCreate, BehaviorMetricUpdate
+
+
+def create_behavior_metric(db: Session, data: BehaviorMetricCreate) -> BehaviorMetric:
+    metric = BehaviorMetric(**data.model_dump())
+    db.add(metric)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        # Final defense against a race between the caller's existence/
+        # uniqueness checks and this insert: either the application was
+        # deleted concurrently, or another request created the metric first.
+        raise ConflictError(
+            "Behavior metric could not be created: duplicate application_id "
+            "or the application no longer exists"
+        ) from exc
+    db.refresh(metric)
+    return metric
+
+
+def get_behavior_metric(db: Session, metric_id: int) -> BehaviorMetric | None:
+    return db.get(BehaviorMetric, metric_id)
+
+
+def get_behavior_metric_by_application(
+    db: Session, application_id: int
+) -> BehaviorMetric | None:
+    stmt = select(BehaviorMetric).where(BehaviorMetric.application_id == application_id)
+    return db.scalars(stmt).first()
+
+
+def get_behavior_metrics(db: Session, skip: int = 0, limit: int = 100) -> list[BehaviorMetric]:
+    stmt = select(BehaviorMetric).order_by(BehaviorMetric.id).offset(skip).limit(limit)
+    return list(db.scalars(stmt).all())
+
+
+def update_behavior_metric(
+    db: Session, metric_id: int, data: BehaviorMetricUpdate
+) -> BehaviorMetric | None:
+    metric = get_behavior_metric(db, metric_id)
+    if metric is None:
+        return None
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(metric, field, value)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise ConflictError(
+            "Could not update behavior metric due to a data integrity conflict"
+        ) from exc
+    db.refresh(metric)
+    return metric
+
+
+def delete_behavior_metric(db: Session, metric_id: int) -> bool:
+    metric = get_behavior_metric(db, metric_id)
+    if metric is None:
+        return False
+    db.delete(metric)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise ConflictError(
+            "Could not delete behavior metric due to a data integrity conflict"
+        ) from exc
+    return True
