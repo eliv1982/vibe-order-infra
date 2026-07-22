@@ -186,6 +186,16 @@ services:
       - proxy-net
     depends_on:
       - registry
+      # backend: nginx.conf теперь ссылается на upstream "backend" в
+      # location ^~ /api/ (proxy_pass http://backend:8000; без переменной,
+      # т.е. хост резолвится статически при старте/reload). В nginx.conf
+      # нет глобального "resolver", поэтому если backend-контейнер ещё не
+      # создан на proxy-net в момент старта Nginx (холодный старт всего
+      # стека / реюут VPS), Nginx упадёт с "host not found in upstream".
+      # У backend нет healthcheck, поэтому используем ту же простую форму
+      # (без condition), что и у registry — Compose гарантирует, что
+      # backend хотя бы создан/запущен раньше nginx.
+      - backend
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:80/healthz"]
       interval: 15s
