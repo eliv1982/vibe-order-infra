@@ -182,6 +182,11 @@ services:
       # registry-vibe.elivcloud.org (SAN), физически лежит только под
       # /etc/letsencrypt/live/vibe.elivcloud.org/ на хосте.
       - /etc/letsencrypt:/etc/letsencrypt:ro
+      # Собранный статический frontend (Vite build, см. frontend/README) —
+      # read-only bind mount готового frontend/dist прямо в стандартный
+      # webroot образа nginx. Собирается ВНЕ этого контейнера (временным
+      # Node-контейнером на хосте), сам nginx Node/npm не содержит.
+      - ./frontend/dist:/usr/share/nginx/html:ro
     networks:
       - proxy-net
     depends_on:
