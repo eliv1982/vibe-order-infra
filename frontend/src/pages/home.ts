@@ -39,10 +39,13 @@ export function renderHome(root: HTMLElement): void {
   wireHeroSection(root);
   wireHoverTracking(root);
   wireApplicationForm(root, state);
+  wireApplicationSummary(root);
+  renderApplicationSummary(root, state);
   void loadServices(root, state);
 }
 
-function homeTemplate(): string {
+/** Exported for testing (see pages/render.test.ts) — must never link to /admin (see item 7). */
+export function homeTemplate(): string {
   return `
     <div class="page">
       <div class="blob-field" aria-hidden="true">
@@ -58,7 +61,6 @@ function homeTemplate(): string {
         <nav class="site-nav" aria-label="Основная навигация">
           <a href="#services">Услуги</a>
           <a href="#application-form">Заявка</a>
-          <a href="/admin" data-link>Админ</a>
         </nav>
       </header>
 
@@ -94,12 +96,14 @@ function homeTemplate(): string {
         <div class="card service-detail" id="service-detail" hidden></div>
       </section>
 
-      <section class="section container" id="application-form" data-hover-section="application_form">
+      <section class="section container container--wide" id="application-form" data-hover-section="application_form">
         <div class="section-heading">
           <span class="eyebrow">Заявка</span>
-          <h2>Расскажите нам о задаче</h2>
-          <p>Заполните форму — мы свяжемся с вами в выбранное время удобным способом.</p>
+          <h2>Оформите заявку на выбранную услугу</h2>
+          <p>Расскажите немного о себе и уточните детали — мы свяжемся с вами удобным способом.</p>
         </div>
+
+        <div class="card application-summary" id="application-summary" aria-live="polite"></div>
 
         <div class="card form-card">
           <div id="form-banner" role="status" aria-live="polite"></div>
@@ -118,7 +122,6 @@ function homeTemplate(): string {
           <div class="footer-links">
             <a href="#services">Услуги</a>
             <a href="#application-form">Заявка</a>
-            <a href="/admin" data-link>Административная панель</a>
           </div>
         </div>
       </footer>
@@ -220,41 +223,37 @@ function applicationFormFieldsTemplate(): string {
     </fieldset>
 
     <fieldset>
-      <legend>О вашем бизнесе</legend>
+      <legend>О вас и вашем деле</legend>
       <div class="field-grid">
         ${textField('business_niche', 'Сфера деятельности', {
           maxLength: 255,
           placeholder: 'Например, автопарк такси, автосалон',
         })}
         ${selectField('company_size', 'Размер компании', COMPANY_SIZE_OPTIONS)}
-        ${selectField('business_size', 'Масштаб бизнеса', BUSINESS_SIZE_OPTIONS)}
+        ${selectField('business_size', 'Тип бизнеса', BUSINESS_SIZE_OPTIONS)}
         ${selectField('requester_role', 'Ваша роль', REQUESTER_ROLE_OPTIONS)}
       </div>
       ${textareaField('business_info', 'Коротко о вашем бизнесе')}
     </fieldset>
 
     <fieldset>
-      <legend>Детали задачи</legend>
+      <legend>Детали запроса</legend>
       <div class="field-grid">
         ${selectField('task_scope', 'Формат сотрудничества', TASK_SCOPE_OPTIONS)}
-        ${selectField('task_type', 'Тип задачи', TASK_TYPE_OPTIONS)}
+        ${selectField('task_type', 'Тип запроса', TASK_TYPE_OPTIONS)}
         ${selectField('deadline', 'Срок выполнения', DEADLINE_OPTIONS)}
       </div>
-      ${textareaField('need_scope', 'Что именно нужно сделать')}
+      ${textareaField('need_scope', 'Дополнительные детали по услуге')}
     </fieldset>
 
     <fieldset>
-      <legend>Как с вами связаться</legend>
+      <legend>Связь и комментарий</legend>
       ${radioChipGroup(
         'preferred_contact_method',
         'Предпочитаемый способ связи',
         PREFERRED_CONTACT_METHOD_OPTIONS,
       )}
       ${selectField('preferred_contact_time', 'Удобное время', PREFERRED_CONTACT_TIME_OPTIONS)}
-    </fieldset>
-
-    <fieldset>
-      <legend>Комментарий</legend>
       ${textareaField('comment', 'Комментарий', {
         required: false,
         placeholder: 'Любые дополнительные пожелания',
@@ -284,8 +283,10 @@ export function serviceCardTemplate(service: AdminSettingRead): string {
     <label class="service-card">
       <input type="radio" name="selected_service" value="${service.id}" required />
       <span class="service-card-body">
+        <span class="service-card-badge" aria-hidden="true">✓ Выбрано</span>
         <h3>${escapeHtml(service.service_name)}</h3>
-        <p>${formatBudget(Number(service.budget_min))} – ${formatBudget(Number(service.budget_max))}</p>
+        ${service.description ? `<p class="service-card-desc">${escapeHtml(service.description)}</p>` : '<p class="service-card-desc"></p>'}
+        <p class="service-card-budget">${formatBudget(Number(service.budget_min))} – ${formatBudget(Number(service.budget_max))}</p>
       </span>
     </label>
   `;
@@ -295,6 +296,58 @@ export function serviceCardTemplate(service: AdminSettingRead): string {
  * grid and to re-check the selected service right before submit. */
 export function isServiceIdInList(services: AdminSettingRead[], serviceId: number): boolean {
   return services.some((service) => service.id === serviceId);
+}
+
+/**
+ * "Ваша заявка" summary shown directly above the form card — keeps the
+ * chosen service/budget in view while the user fills in the rest, instead
+ * of losing that context after scrolling down from the services section.
+ * Exported for testing (see pages/render.test.ts).
+ */
+export function applicationSummaryTemplate(
+  service: AdminSettingRead | null,
+  budget: number,
+): string {
+  if (!service) {
+    return `
+      <div class="application-summary-empty">
+        <span class="eyebrow">Ваша заявка</span>
+        <p>Чтобы оформить заявку, сначала выберите услугу в разделе «Услуги» выше.</p>
+        <a class="btn btn-secondary btn-small" href="#services">Выбрать услугу</a>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="application-summary-filled">
+      <div class="application-summary-header">
+        <span class="eyebrow">Ваша заявка</span>
+        <button type="button" class="link-button" data-action="change-service">Изменить услугу</button>
+      </div>
+      <h3>${escapeHtml(service.service_name)}</h3>
+      ${service.description ? `<p class="application-summary-desc">${escapeHtml(service.description)}</p>` : ''}
+      <p class="application-summary-budget">Бюджет заявки: <strong>${formatBudget(budget)}</strong></p>
+    </div>
+  `;
+}
+
+function renderApplicationSummary(root: HTMLElement, state: HomeState): void {
+  const summaryEl = root.querySelector<HTMLElement>('#application-summary');
+  if (!summaryEl) return;
+  summaryEl.innerHTML = applicationSummaryTemplate(state.selectedService, state.selectedBudget);
+}
+
+function wireApplicationSummary(root: HTMLElement): void {
+  const summaryEl = root.querySelector<HTMLElement>('#application-summary');
+  if (!summaryEl) return;
+
+  summaryEl.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    if (!target.closest('[data-action="change-service"]')) return;
+    trackClick('change_service');
+    document.getElementById('services')?.scrollIntoView({ behavior: 'smooth' });
+  });
 }
 
 async function loadServices(root: HTMLElement, state: HomeState): Promise<void> {
@@ -366,7 +419,7 @@ function selectService(root: HTMLElement, state: HomeState, service: AdminSettin
       value="${initial}"
       ${min === max ? 'disabled' : ''}
     />
-    <p>Ваш бюджет: <span class="budget-value" id="budget-value">${formatBudget(initial)}</span></p>
+    <p>Бюджет заявки: <span class="budget-value" id="budget-value">${formatBudget(initial)}</span></p>
   `;
 
   const slider = detailEl.querySelector<HTMLInputElement>('#budget-slider');
@@ -377,7 +430,10 @@ function selectService(root: HTMLElement, state: HomeState, service: AdminSettin
     const value = clampToRange(Number(slider.value), min, max);
     state.selectedBudget = value;
     if (valueEl) valueEl.textContent = formatBudget(value);
+    renderApplicationSummary(root, state);
   });
+
+  renderApplicationSummary(root, state);
 }
 
 function wireApplicationForm(root: HTMLElement, state: HomeState): void {
@@ -437,6 +493,7 @@ async function handleSubmit(
     state.selectedService = null;
     const detailEl = root.querySelector<HTMLElement>('#service-detail');
     if (detailEl) detailEl.hidden = true;
+    renderApplicationSummary(root, state);
     await loadServices(root, state);
     document.getElementById('services')?.scrollIntoView({ behavior: 'smooth' });
     return;
