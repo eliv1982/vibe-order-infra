@@ -31,6 +31,12 @@ _PRODUCTION_POSTGRES_DB = os.environ.get("POSTGRES_DB")
 os.environ.setdefault("POSTGRES_USER", "unused_placeholder_user")
 os.environ.setdefault("POSTGRES_PASSWORD", "unused_placeholder_password")
 os.environ.setdefault("POSTGRES_DB", "unused_placeholder_db")
+# Fixed test-only secret - long enough to pass Settings' min_length=32 and
+# distinct from the .env.example placeholder, so it isn't rejected as an
+# insecure placeholder value. Never used outside the test suite.
+os.environ.setdefault(
+    "JWT_SECRET_KEY", "test-only-secret-key-for-pytest-do-not-use-in-prod-1234567890"
+)
 
 import pytest
 from fastapi.testclient import TestClient
