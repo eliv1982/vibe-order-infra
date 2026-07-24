@@ -1,9 +1,23 @@
 """Application settings loaded from environment variables (see docker-compose.yml)."""
 
 from functools import lru_cache
+from typing import Literal
 
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL
+
+# Known example/placeholder JWT secrets that must never be used for real - if
+# JWT_SECRET_KEY is accidentally left at one of these (e.g. .env.example was
+# copied to .env without editing it), Settings() must fail loudly instead of
+# quietly starting up with a public, guessable secret.
+_INSECURE_JWT_SECRET_PLACEHOLDERS = {
+    "change_me_to_a_random_64_char_secret_generated_locally_1234567890",
+    "changeme",
+    "change_me",
+    "secret",
+    "your-secret-key",
+}
 
 
 class Settings(BaseSettings):
@@ -16,6 +30,28 @@ class Settings(BaseSettings):
     postgres_db: str
     postgres_host: str = "postgres"
     postgres_port: int = 5432
+
+    # No default: absence must fail startup rather than silently run
+    # unauthenticated-equivalent (a guessable/shared secret). min_length=32
+    # rules out trivially weak values in addition to the placeholder check
+    # below.
+    jwt_secret_key: str = Field(..., min_length=32)
+    # Restricted to symmetric HMAC variants only - this app only ever holds a
+    # single shared secret, so "none" or an asymmetric algorithm would be a
+    # misconfiguration, not a valid alternative.
+    jwt_algorithm: Literal["HS256", "HS384", "HS512"] = "HS256"
+    access_token_expire_minutes: int = Field(30, gt=0, le=1440)
+
+    @field_validator("jwt_secret_key")
+    @classmethod
+    def _reject_placeholder_jwt_secret(cls, value: str) -> str:
+        if value.strip().lower() in _INSECURE_JWT_SECRET_PLACEHOLDERS:
+            raise ValueError(
+                "JWT_SECRET_KEY is set to a known placeholder value - generate a real "
+                'secret (e.g. `python -c "import secrets; print(secrets.token_urlsafe(64))"`) '
+                "and set it in your local .env"
+            )
+        return value
 
     @property
     def database_url(self) -> URL:
