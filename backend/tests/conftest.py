@@ -103,3 +103,40 @@ def client(db_session):
     test_client = TestClient(app)
     yield test_client
     app.dependency_overrides.clear()
+
+
+@pytest.fixture()
+def admin_auth_headers(client) -> dict[str, str]:
+    """Bearer auth headers for a freshly registered, active admin.
+
+    Each test's db_session is its own isolated, rolled-back-at-teardown
+    transaction (see db_session above), so registering a fixed
+    username/password here can never collide with or leak into any other
+    test, regardless of run order.
+    """
+    username = "admin"
+    password = "StrongPassw0rd!123"
+
+    register_response = client.post(
+        "/api/auth/register", json={"username": username, "password": password}
+    )
+    assert register_response.status_code == 201, (
+        f"admin registration failed with status {register_response.status_code}: "
+        f"{register_response.text}"
+    )
+
+    login_response = client.post(
+        "/api/auth/login", json={"username": username, "password": password}
+    )
+    assert login_response.status_code == 200, (
+        f"admin login failed with status {login_response.status_code}: {login_response.text}"
+    )
+
+    body = login_response.json()
+    token = body.get("access_token")
+    assert token, "admin login response is missing a non-empty access_token"
+    assert body.get("token_type") == "bearer", (
+        f"expected login token_type 'bearer', got {body.get('token_type')!r}"
+    )
+
+    return {"Authorization": f"Bearer {token}"}

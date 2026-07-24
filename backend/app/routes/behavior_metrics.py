@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.deps import get_current_admin
 from app.core.exceptions import ConflictError
 from app.crud import application as application_crud
 from app.crud import behavior_metric as crud
@@ -20,6 +21,7 @@ router = APIRouter(prefix="/behavior-metrics", tags=["behavior-metrics"])
 def create_behavior_metric(
     payload: BehaviorMetricCreate, db: Session = Depends(get_db)
 ) -> BehaviorMetricRead:
+    # Public: the client form sends this right after creating an application.
     if application_crud.get_application(db, payload.application_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
     if crud.get_behavior_metric_by_application(db, payload.application_id) is not None:
@@ -35,7 +37,7 @@ def create_behavior_metric(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
-@router.get("", response_model=list[BehaviorMetricRead])
+@router.get("", response_model=list[BehaviorMetricRead], dependencies=[Depends(get_current_admin)])
 def list_behavior_metrics(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=100),
@@ -44,7 +46,9 @@ def list_behavior_metrics(
     return crud.get_behavior_metrics(db, skip=skip, limit=limit)
 
 
-@router.get("/{metric_id}", response_model=BehaviorMetricRead)
+@router.get(
+    "/{metric_id}", response_model=BehaviorMetricRead, dependencies=[Depends(get_current_admin)]
+)
 def get_behavior_metric(metric_id: int, db: Session = Depends(get_db)) -> BehaviorMetricRead:
     metric = crud.get_behavior_metric(db, metric_id)
     if metric is None:
@@ -52,7 +56,9 @@ def get_behavior_metric(metric_id: int, db: Session = Depends(get_db)) -> Behavi
     return metric
 
 
-@router.patch("/{metric_id}", response_model=BehaviorMetricRead)
+@router.patch(
+    "/{metric_id}", response_model=BehaviorMetricRead, dependencies=[Depends(get_current_admin)]
+)
 def update_behavior_metric(
     metric_id: int, payload: BehaviorMetricUpdate, db: Session = Depends(get_db)
 ) -> BehaviorMetricRead:
@@ -65,7 +71,11 @@ def update_behavior_metric(
     return metric
 
 
-@router.delete("/{metric_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{metric_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(get_current_admin)],
+)
 def delete_behavior_metric(metric_id: int, db: Session = Depends(get_db)) -> None:
     try:
         deleted = crud.delete_behavior_metric(db, metric_id)
