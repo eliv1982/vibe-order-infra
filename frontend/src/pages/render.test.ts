@@ -128,3 +128,47 @@ describe('homeTemplate — form card hidden until a service is selected', () => 
     expect(formCardIndex).toBeGreaterThan(summaryIndex);
   });
 });
+
+describe('homeTemplate — AUREL Detailing wording, not IT/freelance/generic-business wording', () => {
+  // These phrases came from a leftover IT-services/freelance-project intake
+  // template and were replaced with car detailing wording (see options.ts
+  // and applicationFormFieldsTemplate() in home.ts). None of them — as
+  // form option values or as visible labels/legends — must resurface.
+  const bannedPhrases = [
+    'Разработка с нуля',
+    'Доработка существующего',
+    'Пробный проект',
+    'Постоянное сотрудничество',
+    'Размер компании',
+    'Ниша бизнеса',
+    'Сфера деятельности',
+    'Объем задачи',
+    'Объём задачи',
+    'Роль заполняющего',
+  ];
+
+  it.each(bannedPhrases)('does not contain the leftover IT/business phrase %s', (phrase) => {
+    expect(homeTemplate()).not.toContain(phrase);
+  });
+});
+
+describe('homeTemplate — business_niche field (vehicle usage)', () => {
+  // Scoped to just the business_niche <select> block (not the full
+  // template, not exact attribute order) so this stays robust to
+  // unrelated markup/reordering changes elsewhere in the form.
+  it('renders business_niche as a required select with AUREL-relevant vehicle-usage options', () => {
+    const html = homeTemplate();
+
+    const selectMatch = html.match(/<select\b[^>]*id="business_niche"[^>]*>[\s\S]*?<\/select>/);
+    expect(selectMatch).not.toBeNull();
+
+    const selectHtml = selectMatch![0];
+    expect(selectHtml).toContain('id="business_niche"');
+    expect(selectHtml).toContain('name="business_niche"');
+    expect(selectHtml).toMatch(/\brequired\b/);
+
+    for (const option of ['Личный автомобиль', 'Автопарк компании', 'Автосалон или дилер']) {
+      expect(selectHtml).toContain(`<option value="${option}">${option}</option>`);
+    }
+  });
+});
