@@ -1,5 +1,7 @@
 """HTTP routes for the Application entity: validate via schemas, delegate logic to crud."""
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
@@ -7,9 +9,59 @@ from app.core.database import get_db
 from app.core.deps import get_current_admin
 from app.core.exceptions import ConflictError
 from app.crud import application as crud
+from app.models.application import Application
 from app.schemas.application import ApplicationCreate, ApplicationRead, ApplicationUpdate
+from app.schemas.application_analysis import (
+    ApplicationPriorityRead,
+    PrioritizedApplicationList,
+    ScoringReason,
+)
+from app.services.application_scoring import ApplicationScore, score_application
 
 router = APIRouter(prefix="/applications", tags=["applications"])
+
+
+def _created_at_sort_key(created_at: datetime | None) -> tuple[int, datetime]:
+    """Normalize created_at into a sort key that is safe to compare.
+
+    Returns (presence_flag, normalized_datetime):
+
+    - presence_flag=0 for a known created_at, sorted by the normalized,
+      UTC-aware datetime ascending;
+    - presence_flag=1 if created_at is unexpectedly None, always sorting
+      after every known date (tuple comparison short-circuits on this
+      first element, so the placeholder datetime alongside it is never
+      actually compared against a real one).
+
+    A naive datetime is deterministically treated as UTC (for this sort
+    only - no claim is made about its true origin) so it can be compared
+    against timezone-aware values without Python's "can't compare
+    offset-naive and offset-aware datetimes" TypeError. This compares
+    datetimes directly rather than converting to POSIX timestamps, so it
+    avoids platform-sensitive overflow issues (e.g. datetime.min.timestamp()
+    on Windows).
+    """
+    if created_at is None:
+        return (1, datetime.min.replace(tzinfo=timezone.utc))
+    if created_at.tzinfo is None:
+        return (0, created_at.replace(tzinfo=timezone.utc))
+    return (0, created_at.astimezone(timezone.utc))
+
+
+def _to_priority_read(application: Application, score: ApplicationScore) -> ApplicationPriorityRead:
+    return ApplicationPriorityRead(
+        application=ApplicationRead.model_validate(application),
+        priority_score=score.score,
+        priority_level=score.level,
+        priority_label=score.label,
+        reasons=[
+            ScoringReason(code=reason.code, points=reason.points, label=reason.label)
+            for reason in score.reasons
+        ],
+        recommended_action=score.recommended_action,
+        recommended_team=score.recommended_team,
+        requires_personal_manager=score.requires_personal_manager,
+    )
 
 
 @router.post("", response_model=ApplicationRead, status_code=status.HTTP_201_CREATED)
@@ -28,6 +80,46 @@ def list_applications(
     db: Session = Depends(get_db),
 ) -> list[ApplicationRead]:
     return crud.get_applications(db, skip=skip, limit=limit)
+
+
+@router.get(
+    "/prioritized",
+    response_model=PrioritizedApplicationList,
+    dependencies=[Depends(get_current_admin)],
+)
+def list_prioritized_applications(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> PrioritizedApplicationList:
+    # Declared before GET /{application_id} so "prioritized" is matched
+    # here rather than being captured by that dynamic int path.
+    #
+    # Учебный этап: набор заявок мал, поэтому весь список загружается в
+    # память и сортируется в Python. При заметном росте объёма данных
+    # потребуется materialized scoring на уровне БД (например, хранимая
+    # колонка/вьюха) или отдельная стратегия пагинации, считающая score
+    # порциями, а не через полную выборку.
+    applications = crud.get_all_applications(db)
+
+    scored = [(application, score_application(application)) for application in applications]
+    scored.sort(
+        key=lambda pair: (
+            -pair[1].score,
+            _created_at_sort_key(pair[0].created_at),
+            pair[0].id,
+        )
+    )
+
+    total = len(scored)
+    page = scored[skip : skip + limit]
+
+    return PrioritizedApplicationList(
+        items=[_to_priority_read(application, score) for application, score in page],
+        total=total,
+        skip=skip,
+        limit=limit,
+    )
 
 
 @router.get(
