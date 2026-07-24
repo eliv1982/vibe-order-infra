@@ -8,6 +8,7 @@ import {
   trackHoverStart,
 } from '../metrics/behaviorMetrics';
 import {
+  BUSINESS_NICHE_OPTIONS,
   BUSINESS_SIZE_OPTIONS,
   COMPANY_SIZE_OPTIONS,
   DEADLINE_OPTIONS,
@@ -223,27 +224,30 @@ function applicationFormFieldsTemplate(): string {
     </fieldset>
 
     <fieldset>
-      <legend>О вас и вашем деле</legend>
+      <legend>О вас и автомобиле</legend>
       <div class="field-grid">
-        ${textField('business_niche', 'Сфера деятельности', {
-          maxLength: 255,
-          placeholder: 'Например, автопарк такси, автосалон',
-        })}
-        ${selectField('company_size', 'Размер компании', COMPANY_SIZE_OPTIONS)}
-        ${selectField('business_size', 'Тип бизнеса', BUSINESS_SIZE_OPTIONS)}
-        ${selectField('requester_role', 'Ваша роль', REQUESTER_ROLE_OPTIONS)}
+        ${selectField('business_niche', 'Как используется автомобиль', BUSINESS_NICHE_OPTIONS)}
+        ${selectField('company_size', 'Класс автомобиля', COMPANY_SIZE_OPTIONS)}
+        ${selectField('business_size', 'Количество автомобилей', BUSINESS_SIZE_OPTIONS)}
+        ${selectField('requester_role', 'Кто обращается', REQUESTER_ROLE_OPTIONS)}
       </div>
-      ${textareaField('business_info', 'Коротко о вашем бизнесе')}
+      ${textareaField('business_info', 'Автомобиль: марка, модель, год выпуска', {
+        placeholder:
+          'Например: Toyota Camry, 2020 год. Укажите также важные особенности состояния — сколы, царапины, потёртости салона',
+      })}
     </fieldset>
 
     <fieldset>
-      <legend>Детали запроса</legend>
+      <legend>Детали обращения</legend>
       <div class="field-grid">
-        ${selectField('task_scope', 'Формат сотрудничества', TASK_SCOPE_OPTIONS)}
-        ${selectField('task_type', 'Тип запроса', TASK_TYPE_OPTIONS)}
-        ${selectField('deadline', 'Срок выполнения', DEADLINE_OPTIONS)}
+        ${selectField('task_scope', 'Формат обслуживания', TASK_SCOPE_OPTIONS)}
+        ${selectField('task_type', 'Тип обращения', TASK_TYPE_OPTIONS)}
+        ${selectField('deadline', 'Желаемый срок записи', DEADLINE_OPTIONS)}
       </div>
-      ${textareaField('need_scope', 'Дополнительные детали по услуге')}
+      ${textareaField('need_scope', 'Пожелания к результату', {
+        placeholder:
+          'Опишите желаемый результат, заметные повреждения, загрязнения, неисправности или другие пожелания',
+      })}
     </fieldset>
 
     <fieldset>
