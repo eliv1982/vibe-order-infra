@@ -48,6 +48,12 @@ def test_applications_list_endpoint_requires_bearer():
     assert operation.get("security") == [{"HTTPBearer": []}]
 
 
+def test_applications_prioritized_endpoint_requires_bearer():
+    schema = TestClient(app).get("/openapi.json").json()
+    operation = schema["paths"]["/api/applications/prioritized"]["get"]
+    assert operation.get("security") == [{"HTTPBearer": []}]
+
+
 def test_behavior_metrics_create_endpoint_has_no_security_requirement():
     schema = TestClient(app).get("/openapi.json").json()
     operation = schema["paths"]["/api/behavior-metrics"]["post"]

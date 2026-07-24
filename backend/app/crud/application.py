@@ -32,6 +32,18 @@ def get_applications(db: Session, skip: int = 0, limit: int = 100) -> list[Appli
     return list(db.scalars(stmt).all())
 
 
+def get_all_applications(db: Session) -> list[Application]:
+    """Fetch every application, unpaginated.
+
+    Used for prioritized listing: scoring and sorting must run over the
+    whole set before skip/limit are applied (see routes/applications.py).
+    Fine for this stage's small dataset; a larger one would need DB-level
+    materialized scoring or a different pagination strategy.
+    """
+    stmt = select(Application).order_by(Application.id)
+    return list(db.scalars(stmt).all())
+
+
 def update_application(
     db: Session, application_id: int, data: ApplicationUpdate
 ) -> Application | None:
