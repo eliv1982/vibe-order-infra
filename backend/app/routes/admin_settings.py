@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.deps import get_current_admin
 from app.core.exceptions import ConflictError, DomainValidationError
 from app.crud import admin_setting as crud
 from app.schemas.admin_setting import AdminSettingCreate, AdminSettingRead, AdminSettingUpdate
@@ -11,7 +12,10 @@ from app.schemas.admin_setting import AdminSettingCreate, AdminSettingRead, Admi
 router = APIRouter(prefix="/admin-settings", tags=["admin-settings"])
 
 
-@router.post("", response_model=AdminSettingRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "", response_model=AdminSettingRead, status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(get_current_admin)],
+)
 def create_admin_setting(
     payload: AdminSettingCreate, db: Session = Depends(get_db)
 ) -> AdminSettingRead:
@@ -21,7 +25,7 @@ def create_admin_setting(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
-@router.get("", response_model=list[AdminSettingRead])
+@router.get("", response_model=list[AdminSettingRead], dependencies=[Depends(get_current_admin)])
 def list_admin_settings(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=100),
@@ -32,11 +36,19 @@ def list_admin_settings(
 
 @router.get("/active", response_model=list[AdminSettingRead])
 def list_active_admin_settings(db: Session = Depends(get_db)) -> list[AdminSettingRead]:
-    """Active services only — used by the frontend to populate the service dropdown."""
+    """Active services only — used by the frontend to populate the service dropdown.
+
+    Public on purpose: this is the client-facing form's public read. Must
+    stay registered before "/{setting_id}" below so Starlette's
+    registration-order route matching keeps resolving "/active" here instead
+    of attempting to parse "active" as a setting_id.
+    """
     return crud.get_active_admin_settings(db)
 
 
-@router.get("/{setting_id}", response_model=AdminSettingRead)
+@router.get(
+    "/{setting_id}", response_model=AdminSettingRead, dependencies=[Depends(get_current_admin)]
+)
 def get_admin_setting(setting_id: int, db: Session = Depends(get_db)) -> AdminSettingRead:
     setting = crud.get_admin_setting(db, setting_id)
     if setting is None:
@@ -44,7 +56,9 @@ def get_admin_setting(setting_id: int, db: Session = Depends(get_db)) -> AdminSe
     return setting
 
 
-@router.patch("/{setting_id}", response_model=AdminSettingRead)
+@router.patch(
+    "/{setting_id}", response_model=AdminSettingRead, dependencies=[Depends(get_current_admin)]
+)
 def update_admin_setting(
     setting_id: int, payload: AdminSettingUpdate, db: Session = Depends(get_db)
 ) -> AdminSettingRead:
@@ -59,7 +73,11 @@ def update_admin_setting(
     return setting
 
 
-@router.delete("/{setting_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{setting_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(get_current_admin)],
+)
 def delete_admin_setting(setting_id: int, db: Session = Depends(get_db)) -> None:
     try:
         deleted = crud.delete_admin_setting(db, setting_id)

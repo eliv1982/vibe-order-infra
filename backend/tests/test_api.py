@@ -44,32 +44,42 @@ def _application_payload(**overrides) -> dict:
     return payload
 
 
-def test_application_crud_roundtrip(client):
+def test_application_crud_roundtrip(client, admin_auth_headers):
+    # Creating an application is public (client form); everything else here
+    # is protected and needs the admin token.
     create_resp = client.post("/api/applications", json=_application_payload())
     assert create_resp.status_code == 201
     application_id = create_resp.json()["id"]
 
-    get_resp = client.get(f"/api/applications/{application_id}")
+    get_resp = client.get(f"/api/applications/{application_id}", headers=admin_auth_headers)
     assert get_resp.status_code == 200
     assert get_resp.json()["first_name"] == "Ivan"
 
-    patch_resp = client.patch(f"/api/applications/{application_id}", json={"first_name": "Petr"})
+    patch_resp = client.patch(
+        f"/api/applications/{application_id}",
+        json={"first_name": "Petr"},
+        headers=admin_auth_headers,
+    )
     assert patch_resp.status_code == 200
     updated = patch_resp.json()
     assert updated["first_name"] == "Petr"
     # A partial PATCH must not clobber fields it didn't mention.
     assert updated["last_name"] == "Petrov"
 
-    delete_resp = client.delete(f"/api/applications/{application_id}")
+    delete_resp = client.delete(f"/api/applications/{application_id}", headers=admin_auth_headers)
     assert delete_resp.status_code == 204
 
-    missing_resp = client.get(f"/api/applications/{application_id}")
+    missing_resp = client.get(f"/api/applications/{application_id}", headers=admin_auth_headers)
     assert missing_resp.status_code == 404
 
 
-def test_application_patch_rejects_explicit_null_for_not_null_field(client):
+def test_application_patch_rejects_explicit_null_for_not_null_field(client, admin_auth_headers):
     application_id = client.post("/api/applications", json=_application_payload()).json()["id"]
-    response = client.patch(f"/api/applications/{application_id}", json={"first_name": None})
+    response = client.patch(
+        f"/api/applications/{application_id}",
+        json={"first_name": None},
+        headers=admin_auth_headers,
+    )
     assert response.status_code == 422
 
 
@@ -94,23 +104,24 @@ def test_behavior_metric_for_missing_application_returns_404(client):
     assert response.status_code == 404
 
 
-def test_deleting_application_cascades_to_behavior_metric(client):
+def test_deleting_application_cascades_to_behavior_metric(client, admin_auth_headers):
     application_id = client.post("/api/applications", json=_application_payload()).json()["id"]
     metric_id = client.post(
         "/api/behavior-metrics", json={"application_id": application_id, "time_on_page": 15}
     ).json()["id"]
 
-    delete_resp = client.delete(f"/api/applications/{application_id}")
+    delete_resp = client.delete(f"/api/applications/{application_id}", headers=admin_auth_headers)
     assert delete_resp.status_code == 204
 
-    missing_metric = client.get(f"/api/behavior-metrics/{metric_id}")
+    missing_metric = client.get(f"/api/behavior-metrics/{metric_id}", headers=admin_auth_headers)
     assert missing_metric.status_code == 404
 
 
-def test_admin_setting_active_endpoint_returns_only_active(client):
+def test_admin_setting_active_endpoint_returns_only_active(client, admin_auth_headers):
     active = client.post(
         "/api/admin-settings",
         json={"service_name": "Active Service", "budget_min": 100, "budget_max": 500, "is_active": True},
+        headers=admin_auth_headers,
     ).json()
     client.post(
         "/api/admin-settings",
@@ -120,8 +131,10 @@ def test_admin_setting_active_endpoint_returns_only_active(client):
             "budget_max": 500,
             "is_active": False,
         },
+        headers=admin_auth_headers,
     )
 
+    # No token here on purpose - /admin-settings/active must stay public.
     response = client.get("/api/admin-settings/active")
     assert response.status_code == 200
     items = response.json()
@@ -129,40 +142,63 @@ def test_admin_setting_active_endpoint_returns_only_active(client):
     assert "Inactive Service" not in {item["service_name"] for item in items}
 
 
-def test_admin_setting_patch_rejects_invalid_merged_budget_range_via_budget_min(client):
+def test_admin_setting_patch_rejects_invalid_merged_budget_range_via_budget_min(
+    client, admin_auth_headers
+):
     setting = client.post(
         "/api/admin-settings",
         json={"service_name": "Consulting", "budget_min": 100, "budget_max": 500, "is_active": True},
+        headers=admin_auth_headers,
     ).json()
 
     # Only budget_min is patched; the stored budget_max (500) makes the
     # resulting merged state 700 > 500, which must be rejected.
-    response = client.patch(f"/api/admin-settings/{setting['id']}", json={"budget_min": 700})
+    response = client.patch(
+        f"/api/admin-settings/{setting['id']}",
+        json={"budget_min": 700},
+        headers=admin_auth_headers,
+    )
     assert response.status_code == 422
 
 
-def test_admin_setting_patch_rejects_invalid_merged_budget_range_via_budget_max(client):
+def test_admin_setting_patch_rejects_invalid_merged_budget_range_via_budget_max(
+    client, admin_auth_headers
+):
     setting = client.post(
         "/api/admin-settings",
         json={"service_name": "Consulting", "budget_min": 300, "budget_max": 500, "is_active": True},
+        headers=admin_auth_headers,
     ).json()
 
     # Only budget_max is patched down; the stored budget_min (300) then
     # exceeds the new budget_max (100), which must be rejected.
-    response = client.patch(f"/api/admin-settings/{setting['id']}", json={"budget_max": 100})
+    response = client.patch(
+        f"/api/admin-settings/{setting['id']}",
+        json={"budget_max": 100},
+        headers=admin_auth_headers,
+    )
     assert response.status_code == 422
 
 
-def test_admin_setting_rejected_budget_patch_leaves_persisted_values_unchanged(client):
+def test_admin_setting_rejected_budget_patch_leaves_persisted_values_unchanged(
+    client, admin_auth_headers
+):
     setting = client.post(
         "/api/admin-settings",
         json={"service_name": "Consulting", "budget_min": 100, "budget_max": 500, "is_active": True},
+        headers=admin_auth_headers,
     ).json()
 
-    rejected = client.patch(f"/api/admin-settings/{setting['id']}", json={"budget_min": 700})
+    rejected = client.patch(
+        f"/api/admin-settings/{setting['id']}",
+        json={"budget_min": 700},
+        headers=admin_auth_headers,
+    )
     assert rejected.status_code == 422
 
-    persisted = client.get(f"/api/admin-settings/{setting['id']}").json()
+    persisted = client.get(
+        f"/api/admin-settings/{setting['id']}", headers=admin_auth_headers
+    ).json()
     assert Decimal(str(persisted["budget_min"])) == Decimal("100")
     assert Decimal(str(persisted["budget_max"])) == Decimal("500")
 
@@ -171,6 +207,9 @@ def test_admin_setting_rejected_budget_patch_leaves_persisted_values_unchanged(c
     "endpoint", ["/api/applications", "/api/admin-settings", "/api/behavior-metrics"]
 )
 @pytest.mark.parametrize("params", [{"skip": -1}, {"limit": 0}, {"limit": 101}])
-def test_pagination_rejects_invalid_params(client, endpoint, params):
-    response = client.get(endpoint, params=params)
+def test_pagination_rejects_invalid_params(client, admin_auth_headers, endpoint, params):
+    # All three targets are now-protected GET "" list endpoints, so a valid
+    # token is required to reach the pagination validation being tested here
+    # (an unauthenticated request would 401 before ever checking params).
+    response = client.get(endpoint, params=params, headers=admin_auth_headers)
     assert response.status_code == 422
