@@ -1,8 +1,11 @@
-import { api, ApiError } from '../api/client';
+import { api, ApiError, isUnauthorizedError } from '../api/client';
+import { clearToken, getToken, saveToken } from '../api/tokenStorage';
 import type {
+  AdminRead,
   AdminSettingCreatePayload,
   AdminSettingRead,
   AdminSettingUpdatePayload,
+  AuthCheckResponse,
 } from '../api/types';
 import { escapeHtml } from '../utils/html';
 import { formatBudget } from '../utils/format';
@@ -12,41 +15,425 @@ interface AdminState {
   editingId: number | null;
 }
 
-export function renderAdmin(root: HTMLElement): void {
-  root.innerHTML = adminTemplate();
+/**
+ * Generation guard for async render flows: every renderAdmin() call (and
+ * every explicit session-ending transition — logout, a 401-forced session
+ * expiry) starts a new generation. Each async flow captures the renderId it
+ * was started under and re-checks isCurrentRender() after every await and
+ * before every DOM mutation, so a late-arriving response from a superseded
+ * flow can no longer paint over newer UI, re-open the panel, or resurrect a
+ * cleared token.
+ */
+let renderGeneration = 0;
 
-  const state: AdminState = { services: [], editingId: null };
-
-  wireCreateForm(root, state);
-  wireListContainer(root, state);
-  void loadServices(root, state);
+function beginRender(): number {
+  renderGeneration += 1;
+  return renderGeneration;
 }
 
-function adminTemplate(): string {
+function isCurrentRender(renderId: number): boolean {
+  return renderId === renderGeneration;
+}
+
+export function renderAdmin(root: HTMLElement): void {
+  const renderId = beginRender();
+  void runAuthGate(root, renderId);
+}
+
+/** Pure — unit tested. Registration is only offered while no admin exists yet. */
+export function shouldOfferRegistration(check: AuthCheckResponse): boolean {
+  return !check.admin_exists && check.registration_allowed;
+}
+
+const SESSION_EXPIRED_NOTICE = 'Сессия истекла — войдите снова.';
+
+async function runAuthGate(root: HTMLElement, renderId: number): Promise<void> {
+  root.innerHTML = loadingTemplate();
+
+  let check: AuthCheckResponse;
+  try {
+    check = await api.checkAuthStatus();
+  } catch {
+    if (!isCurrentRender(renderId)) return;
+    renderAuthCheckError(root, renderId);
+    return;
+  }
+  if (!isCurrentRender(renderId)) return;
+
+  if (shouldOfferRegistration(check)) {
+    renderRegisterView(root, renderId);
+    return;
+  }
+
+  if (!getToken()) {
+    renderLoginView(root, renderId);
+    return;
+  }
+
+  try {
+    const admin = await api.getCurrentAdmin();
+    if (!isCurrentRender(renderId)) return;
+    renderAuthenticatedView(root, renderId, admin);
+  } catch (error) {
+    if (!isCurrentRender(renderId)) return;
+    if (isUnauthorizedError(error)) {
+      // Also cleared centrally inside client.ts's request() on the same
+      // 401 — calling it again here is a harmless no-op, and keeps this
+      // "the token was rejected" outcome self-contained/verifiable on its
+      // own rather than depending on that other call having happened.
+      handleSessionExpired(root, renderId);
+    } else {
+      renderAuthCheckError(root, renderId);
+    }
+  }
+}
+
+function pageHeaderTemplate(): string {
+  return `
+    <header class="site-header">
+      <a class="brand" href="/" data-link>
+        <span class="brand-mark">AUREL</span><span>Detailing</span>
+      </a>
+      <nav class="site-nav" aria-label="Основная навигация">
+        <a href="/" data-link>На главную</a>
+      </nav>
+    </header>
+  `;
+}
+
+function loadingTemplate(): string {
+  return `
+    <div class="page container admin-page admin-auth-page">
+      ${pageHeaderTemplate()}
+      <div class="card form-card admin-auth-card">
+        <p class="admin-empty">Проверяем авторизацию…</p>
+      </div>
+    </div>
+  `;
+}
+
+function authCheckErrorTemplate(): string {
+  return `
+    <div class="page container admin-page admin-auth-page">
+      ${pageHeaderTemplate()}
+      <div class="card form-card admin-auth-card">
+        <div class="banner banner--error" role="alert">
+          Не удалось проверить авторизацию. Проверьте соединение и попробуйте снова.
+        </div>
+        <button type="button" class="btn btn-primary" id="auth-check-retry">Повторить</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderAuthCheckError(root: HTMLElement, renderId: number): void {
+  if (!isCurrentRender(renderId)) return;
+  root.innerHTML = authCheckErrorTemplate();
+  root.querySelector<HTMLButtonElement>('#auth-check-retry')?.addEventListener('click', () => {
+    if (!isCurrentRender(renderId)) return;
+    // Retry starts a fresh generation rather than reusing renderId — this
+    // detached handler (and this renderId) is now permanently stale, so it
+    // can never re-trigger the auth flow a second time, and nothing tied to
+    // the old generation can act after this point.
+    const newRenderId = beginRender();
+    void runAuthGate(root, newRenderId);
+  });
+}
+
+function noticeBannerHtml(notice: string | undefined): string {
+  return notice ? `<div class="banner banner--notice">${escapeHtml(notice)}</div>` : '';
+}
+
+function registerTemplate(notice?: string): string {
+  return `
+    <div class="page container admin-page admin-auth-page">
+      ${pageHeaderTemplate()}
+      <div class="card form-card admin-auth-card">
+        <span class="eyebrow">Первый запуск</span>
+        <h2>Создайте учётную запись администратора</h2>
+        <div id="auth-banner" role="status" aria-live="polite">${noticeBannerHtml(notice)}</div>
+        <form id="register-form" novalidate>
+          <div class="field">
+            <label for="register-username">Имя пользователя</label>
+            <input
+              type="text"
+              id="register-username"
+              name="username"
+              required
+              minlength="3"
+              maxlength="150"
+              autocomplete="username"
+            />
+          </div>
+          <div class="field">
+            <label for="register-password">Пароль</label>
+            <input
+              type="password"
+              id="register-password"
+              name="password"
+              required
+              minlength="8"
+              maxlength="256"
+              autocomplete="new-password"
+            />
+          </div>
+          <div class="field">
+            <label for="register-password-confirm">Повторите пароль</label>
+            <input
+              type="password"
+              id="register-password-confirm"
+              name="password_confirm"
+              required
+              minlength="8"
+              maxlength="256"
+              autocomplete="new-password"
+            />
+          </div>
+          <button class="btn btn-primary" type="submit" id="register-submit">
+            Зарегистрироваться
+          </button>
+        </form>
+      </div>
+    </div>
+  `;
+}
+
+function renderRegisterView(root: HTMLElement, renderId: number, notice?: string): void {
+  if (!isCurrentRender(renderId)) return;
+  root.innerHTML = registerTemplate(notice);
+  wireRegisterForm(root, renderId);
+}
+
+function wireRegisterForm(root: HTMLElement, renderId: number): void {
+  const form = root.querySelector<HTMLFormElement>('#register-form');
+  const submitBtn = root.querySelector<HTMLButtonElement>('#register-submit');
+  const bannerEl = root.querySelector<HTMLElement>('#auth-banner');
+  if (!form || !submitBtn || !bannerEl) return;
+
+  let inFlight = false;
+
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    if (!isCurrentRender(renderId) || inFlight) return;
+    inFlight = true;
+    void handleRegister(root, renderId, form, submitBtn, bannerEl).finally(() => {
+      inFlight = false;
+    });
+  });
+}
+
+/** Mirrors syncBudgetRangeValidity's pattern: a native custom-validity check
+ * run right before form.reportValidity(), not on every keystroke. */
+function syncPasswordConfirmValidity(form: HTMLFormElement): void {
+  const passwordInput = form.querySelector<HTMLInputElement>('[name="password"]');
+  const confirmInput = form.querySelector<HTMLInputElement>('[name="password_confirm"]');
+  if (!passwordInput || !confirmInput) return;
+
+  confirmInput.setCustomValidity(
+    passwordInput.value === confirmInput.value ? '' : 'Пароли не совпадают.',
+  );
+}
+
+async function handleRegister(
+  root: HTMLElement,
+  renderId: number,
+  form: HTMLFormElement,
+  submitBtn: HTMLButtonElement,
+  bannerEl: HTMLElement,
+): Promise<void> {
+  bannerEl.innerHTML = '';
+
+  syncPasswordConfirmValidity(form);
+  if (!form.reportValidity()) return;
+
+  const formData = new FormData(form);
+  // Username: trimmed (consistent with the backend's own normalization) but
+  // never lowercased here — the backend case-folds for storage/comparison.
+  const username = String(formData.get('username') ?? '').trim();
+  // Password: never trimmed, anywhere in this pipeline.
+  const password = String(formData.get('password') ?? '');
+
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Создаём…';
+
+  try {
+    await api.registerAdmin({ username, password });
+  } catch (error) {
+    if (!isCurrentRender(renderId)) return;
+    if (error instanceof ApiError && error.status === 409) {
+      // Someone else already registered (race) — re-check canonical state
+      // per the required flow, then always land on the login view.
+      try {
+        await api.checkAuthStatus();
+      } catch {
+        // Ignore — we're going to the login view regardless of this result.
+      }
+      if (!isCurrentRender(renderId)) return;
+      renderLoginView(root, renderId, 'Администратор уже зарегистрирован. Пожалуйста, войдите.');
+      return;
+    }
+
+    const message =
+      error instanceof ApiError ? error.message : 'Не удалось создать администратора.';
+    bannerEl.innerHTML = `<div class="banner banner--error">${escapeHtml(message)}</div>`;
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Зарегистрироваться';
+    return;
+  }
+  if (!isCurrentRender(renderId)) return;
+
+  // Auto-login with the credentials just submitted (still only in memory),
+  // then verify via /me before showing the panel — simpler and more
+  // reliable than asking the admin to retype everything on a second screen.
+  try {
+    const tokenResponse = await api.loginAdmin({ username, password });
+    if (!isCurrentRender(renderId)) return;
+    saveToken(tokenResponse.access_token);
+    const admin = await api.getCurrentAdmin();
+    if (!isCurrentRender(renderId)) return;
+    renderAuthenticatedView(root, renderId, admin);
+  } catch {
+    if (!isCurrentRender(renderId)) return;
+    renderLoginView(root, renderId, 'Регистрация прошла успешно — войдите, используя указанные данные.');
+  }
+}
+
+const LOGIN_NEUTRAL_ERROR = 'Неверное имя пользователя или пароль.';
+
+function loginTemplate(notice?: string): string {
+  return `
+    <div class="page container admin-page admin-auth-page">
+      ${pageHeaderTemplate()}
+      <div class="card form-card admin-auth-card">
+        <span class="eyebrow">Вход</span>
+        <h2>Вход в административную панель</h2>
+        <div id="auth-banner" role="status" aria-live="polite">${noticeBannerHtml(notice)}</div>
+        <form id="login-form" novalidate>
+          <div class="field">
+            <label for="login-username">Имя пользователя</label>
+            <input type="text" id="login-username" name="username" required autocomplete="username" />
+          </div>
+          <div class="field">
+            <label for="login-password">Пароль</label>
+            <input
+              type="password"
+              id="login-password"
+              name="password"
+              required
+              autocomplete="current-password"
+            />
+          </div>
+          <button class="btn btn-primary" type="submit" id="login-submit">Войти</button>
+        </form>
+      </div>
+    </div>
+  `;
+}
+
+function renderLoginView(root: HTMLElement, renderId: number, notice?: string): void {
+  if (!isCurrentRender(renderId)) return;
+  root.innerHTML = loginTemplate(notice);
+  wireLoginForm(root, renderId);
+}
+
+function wireLoginForm(root: HTMLElement, renderId: number): void {
+  const form = root.querySelector<HTMLFormElement>('#login-form');
+  const submitBtn = root.querySelector<HTMLButtonElement>('#login-submit');
+  const bannerEl = root.querySelector<HTMLElement>('#auth-banner');
+  if (!form || !submitBtn || !bannerEl) return;
+
+  let inFlight = false;
+
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    if (!isCurrentRender(renderId) || inFlight) return;
+    inFlight = true;
+    void handleLogin(root, renderId, form, submitBtn, bannerEl).finally(() => {
+      inFlight = false;
+    });
+  });
+}
+
+async function handleLogin(
+  root: HTMLElement,
+  renderId: number,
+  form: HTMLFormElement,
+  submitBtn: HTMLButtonElement,
+  bannerEl: HTMLElement,
+): Promise<void> {
+  bannerEl.innerHTML = '';
+  if (!form.reportValidity()) return;
+
+  const formData = new FormData(form);
+  const username = String(formData.get('username') ?? '').trim();
+  const password = String(formData.get('password') ?? ''); // never trimmed
+
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Входим…';
+
+  let tokenValue: string;
+  try {
+    const tokenResponse = await api.loginAdmin({ username, password });
+    tokenValue = tokenResponse.access_token;
+  } catch (error) {
+    if (!isCurrentRender(renderId)) return;
+    // Unknown username and wrong password must look identical to the user —
+    // never surface the backend's response body text for this case.
+    const message =
+      error instanceof ApiError && error.status === 401
+        ? LOGIN_NEUTRAL_ERROR
+        : 'Не удалось выполнить вход. Попробуйте ещё раз.';
+    bannerEl.innerHTML = `<div class="banner banner--error">${escapeHtml(message)}</div>`;
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Войти';
+    return;
+  }
+
+  if (!isCurrentRender(renderId)) return;
+  saveToken(tokenValue);
+
+  try {
+    const admin = await api.getCurrentAdmin();
+    if (!isCurrentRender(renderId)) return;
+    renderAuthenticatedView(root, renderId, admin);
+  } catch {
+    if (!isCurrentRender(renderId)) return;
+    clearToken();
+    bannerEl.innerHTML = `<div class="banner banner--error">${escapeHtml(
+      'Не удалось подтвердить сессию. Попробуйте войти снова.',
+    )}</div>`;
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Войти';
+  }
+}
+
+function handleSessionExpired(root: HTMLElement, renderId: number): void {
+  if (!isCurrentRender(renderId)) return;
+  // Also cleared centrally inside client.ts's request() — see runAuthGate's
+  // matching comment for why calling it again here is intentional.
+  clearToken();
+  // A forced session expiry ends this render generation outright — any other
+  // in-flight request still tied to the old (now-unauthenticated) session
+  // must be unable to act, regardless of what the new DOM happens to contain.
+  const newRenderId = beginRender();
+  renderLoginView(root, newRenderId, SESSION_EXPIRED_NOTICE);
+}
+
+function adminPanelTemplate(admin: AdminRead): string {
   return `
     <div class="page container admin-page">
-      <header class="site-header">
-        <a class="brand" href="/" data-link>
-          <span class="brand-mark">AUREL</span><span>Detailing</span>
-        </a>
-        <nav class="site-nav" aria-label="Основная навигация">
-          <a href="/" data-link>На главную</a>
-        </nav>
-      </header>
-
-      <div class="banner banner--notice admin-disclaimer" role="alert">
-        <span aria-hidden="true">⚠️</span>
-        <div>
-          <strong>Учебная административная панель</strong>
-          Авторизация ещё не подключена — любой, кто откроет /admin, может изменять услуги.
-          Проверка прав доступа будет добавлена на следующем этапе. Эту страницу нельзя считать защищённой.
-        </div>
-      </div>
+      ${pageHeaderTemplate()}
 
       <div class="admin-header">
         <div>
           <span class="eyebrow">Услуги</span>
           <h2>Управление услугами</h2>
+        </div>
+        <div class="admin-session">
+          <span>Вы вошли как <strong>${escapeHtml(admin.username)}</strong></span>
+          <button type="button" class="btn btn-secondary btn-small" id="logout-button">
+            Выйти
+          </button>
         </div>
       </div>
 
@@ -177,14 +564,45 @@ function syncBudgetRangeValidity(form: HTMLFormElement): void {
   );
 }
 
-async function loadServices(root: HTMLElement, state: AdminState): Promise<void> {
+function renderAuthenticatedView(root: HTMLElement, renderId: number, admin: AdminRead): void {
+  if (!isCurrentRender(renderId)) return;
+  root.innerHTML = adminPanelTemplate(admin);
+
+  const state: AdminState = { services: [], editingId: null };
+
+  wireLogoutButton(root, renderId);
+  wireCreateForm(root, renderId, state);
+  wireListContainer(root, renderId, state);
+  void loadServices(root, renderId, state);
+}
+
+function wireLogoutButton(root: HTMLElement, renderId: number): void {
+  root.querySelector<HTMLButtonElement>('#logout-button')?.addEventListener('click', () => {
+    if (!isCurrentRender(renderId)) return;
+    clearToken();
+    // Logout ends this render generation outright — see handleSessionExpired
+    // for why any other in-flight request from this session must be unable
+    // to act afterwards (e.g. restore the token or repaint the panel).
+    const newRenderId = beginRender();
+    renderLoginView(root, newRenderId);
+  });
+}
+
+async function loadServices(root: HTMLElement, renderId: number, state: AdminState): Promise<void> {
   const statusEl = root.querySelector<HTMLElement>('#services-list-status');
   if (!statusEl) return;
 
   statusEl.innerHTML = '<p class="admin-empty">Загружаем услуги…</p>';
   try {
-    state.services = await api.getAllServices();
+    const services = await api.getAllServices();
+    if (!isCurrentRender(renderId)) return;
+    state.services = services;
   } catch (error) {
+    if (!isCurrentRender(renderId)) return;
+    if (isUnauthorizedError(error)) {
+      handleSessionExpired(root, renderId);
+      return;
+    }
     console.warn('Failed to load admin settings', error);
     statusEl.innerHTML = '<p class="admin-empty">Не удалось загрузить список услуг.</p>';
     return;
@@ -212,7 +630,7 @@ function renderList(root: HTMLElement, state: AdminState): void {
     .join('');
 }
 
-function wireCreateForm(root: HTMLElement, state: AdminState): void {
+function wireCreateForm(root: HTMLElement, renderId: number, state: AdminState): void {
   const form = root.querySelector<HTMLFormElement>('#create-service-form');
   const submitBtn = root.querySelector<HTMLButtonElement>('#create-service-submit');
   const bannerEl = root.querySelector<HTMLElement>('#create-banner');
@@ -220,12 +638,14 @@ function wireCreateForm(root: HTMLElement, state: AdminState): void {
 
   form.addEventListener('submit', (event) => {
     event.preventDefault();
-    void handleCreate(root, form, submitBtn, bannerEl, state);
+    if (!isCurrentRender(renderId)) return;
+    void handleCreate(root, renderId, form, submitBtn, bannerEl, state);
   });
 }
 
 async function handleCreate(
   root: HTMLElement,
+  renderId: number,
   form: HTMLFormElement,
   submitBtn: HTMLButtonElement,
   bannerEl: HTMLElement,
@@ -252,22 +672,31 @@ async function handleCreate(
 
   try {
     await api.createService(payload);
+    if (!isCurrentRender(renderId)) return;
     form.reset();
-    await loadServices(root, state);
+    await loadServices(root, renderId, state);
   } catch (error) {
+    if (!isCurrentRender(renderId)) return;
+    if (isUnauthorizedError(error)) {
+      handleSessionExpired(root, renderId);
+      return;
+    }
     const message = error instanceof ApiError ? error.message : 'Не удалось создать услугу.';
     bannerEl.innerHTML = `<div class="banner banner--error">${escapeHtml(message)}</div>`;
   } finally {
-    submitBtn.disabled = false;
-    submitBtn.textContent = 'Добавить услугу';
+    if (isCurrentRender(renderId)) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Добавить услугу';
+    }
   }
 }
 
-function wireListContainer(root: HTMLElement, state: AdminState): void {
+function wireListContainer(root: HTMLElement, renderId: number, state: AdminState): void {
   const listEl = root.querySelector<HTMLElement>('#services-list');
   if (!listEl) return;
 
   listEl.addEventListener('click', (event) => {
+    if (!isCurrentRender(renderId)) return;
     const target = event.target;
     if (!(target instanceof Element)) return;
     const button = target.closest('button[data-action]');
@@ -285,9 +714,9 @@ function wireListContainer(root: HTMLElement, state: AdminState): void {
       state.editingId = null;
       renderList(root, state);
     } else if (action === 'delete') {
-      void handleDelete(root, state, id);
+      void handleDelete(root, renderId, state, id);
     } else if (action === 'toggle-active') {
-      void handleToggleActive(root, state, id);
+      void handleToggleActive(root, renderId, state, id);
     }
   });
 
@@ -295,33 +724,51 @@ function wireListContainer(root: HTMLElement, state: AdminState): void {
     const form = event.target;
     if (!(form instanceof HTMLFormElement) || !form.hasAttribute('data-edit-form')) return;
     event.preventDefault();
+    if (!isCurrentRender(renderId)) return;
     const id = Number(form.dataset.id);
-    void handleSaveEdit(root, state, form, id);
+    void handleSaveEdit(root, renderId, state, form, id);
   });
 }
 
-async function handleDelete(root: HTMLElement, state: AdminState, id: number): Promise<void> {
+async function handleDelete(root: HTMLElement, renderId: number, state: AdminState, id: number): Promise<void> {
   const service = state.services.find((item) => item.id === id);
   const label = service ? `«${service.service_name}»` : 'эту услугу';
   if (!window.confirm(`Удалить услугу ${label}? Это действие необратимо.`)) return;
 
   try {
     await api.deleteService(id);
-    await loadServices(root, state);
+    if (!isCurrentRender(renderId)) return;
+    await loadServices(root, renderId, state);
   } catch (error) {
+    if (!isCurrentRender(renderId)) return;
+    if (isUnauthorizedError(error)) {
+      handleSessionExpired(root, renderId);
+      return;
+    }
     console.warn('Failed to delete admin setting', error);
     window.alert(error instanceof ApiError ? error.message : 'Не удалось удалить услугу.');
   }
 }
 
-async function handleToggleActive(root: HTMLElement, state: AdminState, id: number): Promise<void> {
+async function handleToggleActive(
+  root: HTMLElement,
+  renderId: number,
+  state: AdminState,
+  id: number,
+): Promise<void> {
   const service = state.services.find((item) => item.id === id);
   if (!service) return;
 
   try {
     await api.updateService(id, { is_active: !service.is_active });
-    await loadServices(root, state);
+    if (!isCurrentRender(renderId)) return;
+    await loadServices(root, renderId, state);
   } catch (error) {
+    if (!isCurrentRender(renderId)) return;
+    if (isUnauthorizedError(error)) {
+      handleSessionExpired(root, renderId);
+      return;
+    }
     console.warn('Failed to toggle admin setting', error);
     window.alert(error instanceof ApiError ? error.message : 'Не удалось изменить статус услуги.');
   }
@@ -329,6 +776,7 @@ async function handleToggleActive(root: HTMLElement, state: AdminState, id: numb
 
 async function handleSaveEdit(
   root: HTMLElement,
+  renderId: number,
   state: AdminState,
   form: HTMLFormElement,
   id: number,
@@ -352,9 +800,15 @@ async function handleSaveEdit(
 
   try {
     await api.updateService(id, payload);
+    if (!isCurrentRender(renderId)) return;
     state.editingId = null;
-    await loadServices(root, state);
+    await loadServices(root, renderId, state);
   } catch (error) {
+    if (!isCurrentRender(renderId)) return;
+    if (isUnauthorizedError(error)) {
+      handleSessionExpired(root, renderId);
+      return;
+    }
     const message = error instanceof ApiError ? error.message : 'Не удалось сохранить изменения.';
     if (bannerEl) bannerEl.innerHTML = `<div class="banner banner--error">${escapeHtml(message)}</div>`;
   }

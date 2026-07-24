@@ -10,14 +10,20 @@
  */
 
 import type {
+  AdminLoginPayload,
+  AdminRead,
+  AdminRegisterPayload,
   AdminSettingCreatePayload,
   AdminSettingRead,
   AdminSettingUpdatePayload,
   ApplicationCreatePayload,
   ApplicationRead,
+  AuthCheckResponse,
   BehaviorMetricCreatePayload,
   BehaviorMetricRead,
+  TokenResponse,
 } from './types';
+import { clearToken, getToken } from './tokenStorage';
 
 const API_PREFIX = '/api';
 
@@ -29,6 +35,12 @@ export class ApiError extends Error {
     this.name = 'ApiError';
     this.status = status;
   }
+}
+
+/** True for a 401 from a Bearer-protected call — the caller should treat this
+ * as "not authenticated (any more)", not as a generic request failure. */
+export function isUnauthorizedError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 401;
 }
 
 interface FastApiValidationErrorItem {
@@ -59,17 +71,47 @@ export function extractErrorDetail(body: unknown, fallback: string): string {
   return fallback;
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API_PREFIX}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-      ...(options.headers ?? {}),
-    },
-  });
+interface RequestOpts {
+  /** Attach `Authorization: Bearer <token>` when a token is stored, and
+   * treat a 401 response as "clear the stored token" — opt-in per call so
+   * public endpoints never send a token they don't need. */
+  auth?: boolean;
+}
+
+/** Defense-in-depth beyond tokenStorage's own guarantee: never let a
+ * runtime-invalid getToken() result (null/undefined/empty/whitespace) reach
+ * an Authorization header as "Bearer null"/"Bearer undefined"/"Bearer ". */
+function hasUsableToken(token: string | null): token is string {
+  return typeof token === 'string' && token.trim().length > 0;
+}
+
+async function request<T>(
+  path: string,
+  options: RequestInit = {},
+  opts: RequestOpts = {},
+): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+    ...(options.headers as Record<string, string> | undefined),
+  };
+
+  if (opts.auth) {
+    const token = getToken();
+    if (hasUsableToken(token)) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+  }
+
+  const response = await fetch(`${API_PREFIX}${path}`, { ...options, headers });
 
   if (!response.ok) {
+    if (opts.auth && response.status === 401) {
+      // Centralized here so every auth-required call self-heals stale
+      // storage, regardless of which one happened to hit the 401 first.
+      clearToken();
+    }
+
     const fallback = `Запрос завершился с ошибкой (${response.status})`;
     let detail = fallback;
     try {
@@ -88,25 +130,30 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return (await response.json()) as T;
 }
 
-const get = <T>(path: string) => request<T>(path, { method: 'GET' });
-const post = <T>(path: string, body: unknown) =>
-  request<T>(path, { method: 'POST', body: JSON.stringify(body) });
-const patch = <T>(path: string, body: unknown) =>
-  request<T>(path, { method: 'PATCH', body: JSON.stringify(body) });
-const del = (path: string) => request<void>(path, { method: 'DELETE' });
+const get = <T>(path: string, opts?: RequestOpts) => request<T>(path, { method: 'GET' }, opts);
+const post = <T>(path: string, body: unknown, opts?: RequestOpts) =>
+  request<T>(path, { method: 'POST', body: JSON.stringify(body) }, opts);
+const patch = <T>(path: string, body: unknown, opts?: RequestOpts) =>
+  request<T>(path, { method: 'PATCH', body: JSON.stringify(body) }, opts);
+const del = (path: string, opts?: RequestOpts) => request<void>(path, { method: 'DELETE' }, opts);
 
 export const api = {
   getActiveServices: () => get<AdminSettingRead[]>('/admin-settings/active'),
-  getAllServices: () => get<AdminSettingRead[]>('/admin-settings'),
+  getAllServices: () => get<AdminSettingRead[]>('/admin-settings', { auth: true }),
   createService: (payload: AdminSettingCreatePayload) =>
-    post<AdminSettingRead>('/admin-settings', payload),
+    post<AdminSettingRead>('/admin-settings', payload, { auth: true }),
   updateService: (id: number, payload: AdminSettingUpdatePayload) =>
-    patch<AdminSettingRead>(`/admin-settings/${id}`, payload),
-  deleteService: (id: number) => del(`/admin-settings/${id}`),
+    patch<AdminSettingRead>(`/admin-settings/${id}`, payload, { auth: true }),
+  deleteService: (id: number) => del(`/admin-settings/${id}`, { auth: true }),
 
   createApplication: (payload: ApplicationCreatePayload) =>
     post<ApplicationRead>('/applications', payload),
 
   createBehaviorMetric: (payload: BehaviorMetricCreatePayload) =>
     post<BehaviorMetricRead>('/behavior-metrics', payload),
+
+  checkAuthStatus: () => get<AuthCheckResponse>('/auth/check'),
+  registerAdmin: (payload: AdminRegisterPayload) => post<AdminRead>('/auth/register', payload),
+  loginAdmin: (payload: AdminLoginPayload) => post<TokenResponse>('/auth/login', payload),
+  getCurrentAdmin: () => get<AdminRead>('/auth/me', { auth: true }),
 };
