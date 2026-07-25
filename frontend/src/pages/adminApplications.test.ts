@@ -12,6 +12,8 @@ import {
   mountAdminApplications,
   normalizePriorityScore,
   normalizeReasonPoints,
+  priorityLevelFullLabel,
+  priorityLevelLabel,
   priorityScoreDisplay,
   reasonPointsDisplay,
   type ApplicationsSectionController,
@@ -221,8 +223,11 @@ describe('rendering', () => {
     expect(names).toEqual(['Первый', 'Второй', 'Третий']);
   });
 
-  it('shows the hot/medium/low priority label as text, not just a color', async () => {
+  it('shows the Высокий/Средний/Стандартный priority label as text, not just a color, regardless of what backend priority_label says', async () => {
     const items = [
+      // priority_label deliberately holds the old, no-longer-shown wording —
+      // the badge must be driven entirely by priority_level (see
+      // requirement 6 / priorityLevelLabel), never by this backend string.
       makeItem({ priority_level: 'hot', priority_label: 'Горячая' }),
       makeItem({ application: makeApplication(), priority_level: 'medium', priority_label: 'Средняя' }),
       makeItem({ application: makeApplication(), priority_level: 'low', priority_label: 'Низкая' }),
@@ -232,9 +237,31 @@ describe('rendering', () => {
     mountAndActivate(container, makeHost());
 
     await vi.waitFor(() => expect(container.querySelectorAll('.application-card').length).toBe(3));
-    expect(container.textContent).toContain('Горячая');
-    expect(container.textContent).toContain('Средняя');
-    expect(container.textContent).toContain('Низкая');
+    expect(container.textContent).toContain('Высокий');
+    expect(container.textContent).toContain('Средний');
+    expect(container.textContent).toContain('Стандартный');
+    // The old sales-lead-"temperature" wording must never appear in the UI.
+    expect(container.textContent).not.toContain('Горячая');
+    expect(container.textContent).not.toContain('Низкая');
+  });
+
+  it('shows Приоритет обработки context via the badge\'s accessible name (aria-label), not just the short badge text', async () => {
+    const items = [
+      makeItem({ application: makeApplication({ id: 1 }), priority_level: 'hot' }),
+      makeItem({ application: makeApplication({ id: 2 }), priority_level: 'medium' }),
+      makeItem({ application: makeApplication({ id: 3 }), priority_level: 'low' }),
+    ];
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValue(makeList(items));
+    const container = document.createElement('div');
+    mountAndActivate(container, makeHost());
+
+    await vi.waitFor(() => expect(container.querySelectorAll('.application-card').length).toBe(3));
+    const badges = [...container.querySelectorAll<HTMLElement>('.priority-badge')];
+    expect(badges.map((b) => b.getAttribute('aria-label'))).toEqual([
+      'Высокий приоритет обработки',
+      'Средний приоритет обработки',
+      'Стандартный приоритет обработки',
+    ]);
   });
 
   it('shows the score as "N/100"', async () => {
@@ -337,6 +364,21 @@ describe('filterApplications (pure)', () => {
 });
 
 describe('filtering — DOM', () => {
+  it('filter chips read Все/Высокий/Средний/Стандартный, never the old hot/low wording', async () => {
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValue(makeList([]));
+    const container = document.createElement('div');
+    mountAndActivate(container, makeHost());
+    await vi.waitFor(() => expect(container.textContent).toContain('Заявок пока нет'));
+
+    const filterTexts = [...container.querySelectorAll<HTMLElement>('.filter-chip')].map((btn) =>
+      btn.textContent?.trim(),
+    );
+    expect(filterTexts).toEqual(['Все', 'Высокий', 'Средний', 'Стандартный']);
+    expect(container.textContent).not.toContain('Горячие');
+    expect(container.textContent).not.toContain('Низкие');
+    expect(container.textContent).not.toContain('Средние');
+  });
+
   it('clicking a level filter chip shows only matching cards', async () => {
     const items = [
       makeItem({ application: makeApplication({ id: 1 }), priority_level: 'hot', priority_label: 'Горячая' }),
@@ -355,7 +397,7 @@ describe('filtering — DOM', () => {
 
     const cards = container.querySelectorAll<HTMLElement>('.application-card');
     expect(cards.length).toBe(1);
-    expect(cards[0].textContent).toContain('Горячая');
+    expect(cards[0].textContent).toContain('Высокий');
   });
 
   it('typing in the search box filters the visible list', async () => {
@@ -414,12 +456,12 @@ describe('detail modal', () => {
     expect(modalBody.textContent).not.toContain(fullName(items[0].application));
   });
 
-  it('shows the Клиент/Автомобиль/Обращение/Приоритет blocks', async () => {
+  it('shows the Клиент/Автомобиль/Обращение/Приоритет обработки blocks', async () => {
     const container = await renderWithItems([makeItem()]);
     container.querySelector<HTMLButtonElement>('[data-action="view"]')!.click();
 
     const headings = [...container.querySelectorAll('.modal-section h3')].map((h) => h.textContent);
-    expect(headings).toEqual(['Клиент', 'Автомобиль', 'Обращение', 'Приоритет']);
+    expect(headings).toEqual(['Клиент', 'Автомобиль', 'Обращение', 'Приоритет обработки']);
   });
 
   it('shows scoring reasons with their label and a signed points value', async () => {
@@ -580,6 +622,38 @@ describe('isKnownPriorityLevel', () => {
   });
 });
 
+describe('priorityLevelLabel / priorityLevelFullLabel', () => {
+  // Product terminology: scoring reflects a composite processing priority,
+  // not sales-lead "temperature" — hot/medium/low must never surface as
+  // "Горячая/Средняя/Низкая" anywhere in the UI, and an unrecognized level
+  // falls back to the same neutral label the badge itself uses.
+  const cases: Array<[unknown, string, string]> = [
+    ['hot', 'Высокий', 'Высокий приоритет обработки'],
+    ['medium', 'Средний', 'Средний приоритет обработки'],
+    ['low', 'Стандартный', 'Стандартный приоритет обработки'],
+    [null, 'Не определена', 'Не определена'],
+    [undefined, 'Не определена', 'Не определена'],
+    ['HOT', 'Не определена', 'Не определена'],
+    ['hot" onclick="alert(1)"', 'Не определена', 'Не определена'],
+    [{}, 'Не определена', 'Не определена'],
+  ];
+
+  it.each(cases)('priorityLevelLabel(%p) -> %p / priorityLevelFullLabel(%p) -> %p', (input, short, full) => {
+    expect(priorityLevelLabel(input)).toBe(short);
+    expect(priorityLevelFullLabel(input)).toBe(full);
+  });
+
+  it('never returns the old "Горячая"/"Низкая" wording for any input', () => {
+    const allInputs = [...cases.map(([input]) => input), 'medium', 'low'];
+    for (const input of allInputs) {
+      expect(priorityLevelLabel(input)).not.toBe('Горячая');
+      expect(priorityLevelLabel(input)).not.toBe('Низкая');
+      expect(priorityLevelFullLabel(input)).not.toContain('Горячая');
+      expect(priorityLevelFullLabel(input)).not.toContain('Низкая');
+    }
+  });
+});
+
 describe('formatApplicationBudget', () => {
   const cases: Array<[unknown, string]> = [
     [null, '—'],
@@ -707,6 +781,7 @@ describe('runtime hardening — malformed/XSS wire values render safely', () => 
     const badge = container.querySelector<HTMLElement>('.priority-badge')!;
     expect(badge.className).toBe('priority-badge priority-badge--unknown');
     expect(badge.textContent).toBe('Не определена');
+    expect(badge.getAttribute('aria-label')).toBe('Не определена');
     expect((window as unknown as { __pwned_level?: boolean }).__pwned_level).toBeUndefined();
 
     container.querySelector<HTMLButtonElement>('[data-action="view"]')!.click();
