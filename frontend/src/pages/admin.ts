@@ -9,10 +9,19 @@ import type {
 } from '../api/types';
 import { escapeHtml } from '../utils/html';
 import { formatBudget } from '../utils/format';
+import { mountAdminApplications } from './adminApplications';
+import type { ApplicationsSectionController } from './adminApplications';
 
 interface AdminState {
   services: AdminSettingRead[];
   editingId: number | null;
+}
+
+/** Holds the (lazily-created) "Заявки" controller so admin.ts's
+ * session-ending transitions (logout, 401 session expiry) can dispose of
+ * it — see wireLogoutButton/wireTabs. */
+interface ApplicationsControllerRef {
+  current: ApplicationsSectionController | null;
 }
 
 /**
@@ -419,6 +428,48 @@ function handleSessionExpired(root: HTMLElement, renderId: number): void {
   renderLoginView(root, newRenderId, SESSION_EXPIRED_NOTICE);
 }
 
+function servicesSectionTemplate(): string {
+  return `
+    <div class="admin-section-heading">
+      <span class="eyebrow">Услуги</span>
+      <h3>Управление услугами</h3>
+    </div>
+
+    <div class="card form-card admin-create-card">
+      <h3>Добавить услугу</h3>
+      <div id="create-banner" role="status" aria-live="polite"></div>
+      <form id="create-service-form" novalidate>
+        <div class="field-grid">
+          <div class="field">
+            <label for="new-service-name">Название услуги</label>
+            <input type="text" id="new-service-name" name="service_name" required maxlength="255" />
+          </div>
+          <div class="field">
+            <label for="new-budget-min">Бюджет от, ₽</label>
+            <input type="number" id="new-budget-min" name="budget_min" required min="0" step="1" />
+          </div>
+          <div class="field">
+            <label for="new-budget-max">Бюджет до, ₽</label>
+            <input type="number" id="new-budget-max" name="budget_max" required min="0" step="1" />
+          </div>
+          <div class="field checkbox-row field--align-end">
+            <input type="checkbox" id="new-is-active" name="is_active" checked />
+            <label for="new-is-active">Активна сразу</label>
+          </div>
+        </div>
+        <div class="field">
+          <label for="new-description">Описание <span class="hint">(необязательно)</span></label>
+          <textarea id="new-description" name="description"></textarea>
+        </div>
+        <button class="btn btn-primary" type="submit" id="create-service-submit">Добавить услугу</button>
+      </form>
+    </div>
+
+    <div id="services-list-status" role="status" aria-live="polite"></div>
+    <div class="admin-grid" id="services-list"></div>
+  `;
+}
+
 function adminPanelTemplate(admin: AdminRead): string {
   return `
     <div class="page container admin-page">
@@ -426,8 +477,8 @@ function adminPanelTemplate(admin: AdminRead): string {
 
       <div class="admin-header">
         <div>
-          <span class="eyebrow">Услуги</span>
-          <h2>Управление услугами</h2>
+          <span class="eyebrow">Административная панель</span>
+          <h2>AUREL Detailing</h2>
         </div>
         <div class="admin-session">
           <span>Вы вошли как <strong>${escapeHtml(admin.username)}</strong></span>
@@ -437,38 +488,36 @@ function adminPanelTemplate(admin: AdminRead): string {
         </div>
       </div>
 
-      <div class="card form-card admin-create-card">
-        <h3>Добавить услугу</h3>
-        <div id="create-banner" role="status" aria-live="polite"></div>
-        <form id="create-service-form" novalidate>
-          <div class="field-grid">
-            <div class="field">
-              <label for="new-service-name">Название услуги</label>
-              <input type="text" id="new-service-name" name="service_name" required maxlength="255" />
-            </div>
-            <div class="field">
-              <label for="new-budget-min">Бюджет от, ₽</label>
-              <input type="number" id="new-budget-min" name="budget_min" required min="0" step="1" />
-            </div>
-            <div class="field">
-              <label for="new-budget-max">Бюджет до, ₽</label>
-              <input type="number" id="new-budget-max" name="budget_max" required min="0" step="1" />
-            </div>
-            <div class="field checkbox-row field--align-end">
-              <input type="checkbox" id="new-is-active" name="is_active" checked />
-              <label for="new-is-active">Активна сразу</label>
-            </div>
-          </div>
-          <div class="field">
-            <label for="new-description">Описание <span class="hint">(необязательно)</span></label>
-            <textarea id="new-description" name="description"></textarea>
-          </div>
-          <button class="btn btn-primary" type="submit" id="create-service-submit">Добавить услугу</button>
-        </form>
-      </div>
+      <nav class="admin-tabs" role="tablist" aria-label="Разделы административной панели">
+        <button
+          type="button"
+          class="admin-tab"
+          id="admin-tab-services"
+          data-tab="services"
+          role="tab"
+          aria-selected="true"
+          aria-controls="admin-panel-services"
+        >
+          Услуги
+        </button>
+        <button
+          type="button"
+          class="admin-tab"
+          id="admin-tab-applications"
+          data-tab="applications"
+          role="tab"
+          aria-selected="false"
+          aria-controls="admin-panel-applications"
+        >
+          Заявки
+        </button>
+      </nav>
 
-      <div id="services-list-status" role="status" aria-live="polite"></div>
-      <div class="admin-grid" id="services-list"></div>
+      <section id="admin-panel-services" role="tabpanel" aria-labelledby="admin-tab-services">
+        ${servicesSectionTemplate()}
+      </section>
+
+      <section id="admin-panel-applications" role="tabpanel" aria-labelledby="admin-tab-applications" hidden></section>
     </div>
   `;
 }
@@ -569,16 +618,128 @@ function renderAuthenticatedView(root: HTMLElement, renderId: number, admin: Adm
   root.innerHTML = adminPanelTemplate(admin);
 
   const state: AdminState = { services: [], editingId: null };
+  const applicationsControllerRef: ApplicationsControllerRef = { current: null };
 
-  wireLogoutButton(root, renderId);
+  wireLogoutButton(root, renderId, applicationsControllerRef);
   wireCreateForm(root, renderId, state);
   wireListContainer(root, renderId, state);
   void loadServices(root, renderId, state);
+  wireTabs(root, renderId, applicationsControllerRef);
 }
 
-function wireLogoutButton(root: HTMLElement, renderId: number): void {
+type AdminTab = 'services' | 'applications';
+
+/**
+ * Wires the Услуги/Заявки tab switcher. Switching tabs never touches
+ * innerHTML for the whole panel (no full re-render, no page reload) — it
+ * just toggles `hidden` on the two <section>s, so logout/username in the
+ * shared header above stay put regardless of which tab is active. The
+ * applications section is mounted lazily, once, on its first activation;
+ * every subsequent switch drives the same controller's activate()/
+ * deactivate() instead of re-mounting, so a response that arrives after
+ * the admin has switched away from "Заявки" can never repaint that
+ * (now-hidden) panel — see adminApplications.ts's mountAdminApplications.
+ *
+ * Also implements the standard WAI-ARIA tabs keyboard pattern: ArrowRight/
+ * ArrowLeft cycle through tabs, Home/End jump to the first/last, and the
+ * tab that receives focus is immediately selected (Enter/Space and mouse
+ * clicks keep working via the native <button> click behavior — the keydown
+ * handler only ever intercepts the four navigation keys above).
+ */
+function wireTabs(
+  root: HTMLElement,
+  renderId: number,
+  controllerRef: ApplicationsControllerRef,
+): void {
+  const tabButtons = Array.from(root.querySelectorAll<HTMLButtonElement>('.admin-tab'));
+  const servicesPanel = root.querySelector<HTMLElement>('#admin-panel-services');
+  const applicationsPanel = root.querySelector<HTMLElement>('#admin-panel-applications');
+  if (!servicesPanel || !applicationsPanel) return;
+
+  let activeTab: AdminTab = 'services';
+
+  // Arrow functions (not hoisted `function` declarations) so TypeScript
+  // keeps servicesPanel/applicationsPanel narrowed to HTMLElement inside
+  // them, per the null-check above.
+  const syncTabIndexes = (): void => {
+    tabButtons.forEach((btn) => {
+      btn.tabIndex = btn.dataset.tab === activeTab ? 0 : -1;
+    });
+  };
+  syncTabIndexes();
+
+  const selectTab = (tab: AdminTab): void => {
+    if (!isCurrentRender(renderId) || tab === activeTab) return;
+    activeTab = tab;
+
+    tabButtons.forEach((btn) => btn.setAttribute('aria-selected', String(btn.dataset.tab === tab)));
+    syncTabIndexes();
+    servicesPanel.hidden = tab !== 'services';
+    applicationsPanel.hidden = tab !== 'applications';
+
+    if (tab === 'applications') {
+      if (!controllerRef.current) {
+        controllerRef.current = mountAdminApplications(applicationsPanel, {
+          isActive: () => isCurrentRender(renderId),
+          onSessionExpired: () => {
+            controllerRef.current?.dispose();
+            handleSessionExpired(root, renderId);
+          },
+        });
+      }
+      controllerRef.current.activate();
+    } else {
+      controllerRef.current?.deactivate();
+    }
+  };
+
+  tabButtons.forEach((button) => {
+    button.addEventListener('click', () => {
+      const tab = button.dataset.tab as AdminTab | undefined;
+      if (!tab) return;
+      selectTab(tab);
+    });
+
+    button.addEventListener('keydown', (event) => {
+      if (!isCurrentRender(renderId)) return;
+
+      const currentIndex = tabButtons.indexOf(button);
+      let targetIndex: number;
+      switch (event.key) {
+        case 'ArrowRight':
+          targetIndex = (currentIndex + 1) % tabButtons.length;
+          break;
+        case 'ArrowLeft':
+          targetIndex = (currentIndex - 1 + tabButtons.length) % tabButtons.length;
+          break;
+        case 'Home':
+          targetIndex = 0;
+          break;
+        case 'End':
+          targetIndex = tabButtons.length - 1;
+          break;
+        default:
+          return;
+      }
+
+      event.preventDefault();
+      const targetButton = tabButtons[targetIndex];
+      const targetTab = targetButton.dataset.tab as AdminTab | undefined;
+      if (!targetTab) return;
+      selectTab(targetTab);
+      targetButton.focus();
+    });
+  });
+}
+
+function wireLogoutButton(
+  root: HTMLElement,
+  renderId: number,
+  controllerRef: ApplicationsControllerRef,
+): void {
   root.querySelector<HTMLButtonElement>('#logout-button')?.addEventListener('click', () => {
     if (!isCurrentRender(renderId)) return;
+    controllerRef.current?.dispose();
     clearToken();
     // Logout ends this render generation outright — see handleSessionExpired
     // for why any other in-flight request from this session must be unable

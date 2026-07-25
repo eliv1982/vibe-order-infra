@@ -2,7 +2,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, api } from '../api/client';
 import { getToken, saveToken } from '../api/tokenStorage';
-import type { AdminRead, AdminSettingRead, AuthCheckResponse, TokenResponse } from '../api/types';
+import type {
+  AdminRead,
+  AdminSettingRead,
+  ApplicationPriorityRead,
+  AuthCheckResponse,
+  PrioritizedApplicationList,
+  TokenResponse,
+} from '../api/types';
 import { renderAdmin, shouldOfferRegistration } from './admin';
 
 vi.mock('../api/client', async (importOriginal) => {
@@ -21,6 +28,7 @@ vi.mock('../api/client', async (importOriginal) => {
       getActiveServices: vi.fn(),
       createApplication: vi.fn(),
       createBehaviorMetric: vi.fn(),
+      getPrioritizedApplications: vi.fn(),
     },
   };
 });
@@ -42,6 +50,50 @@ function makeAdmin(overrides: Partial<AdminRead> = {}): AdminRead {
 
 function makeToken(overrides: Partial<TokenResponse> = {}): TokenResponse {
   return { access_token: 'a.jwt.token', token_type: 'bearer', expires_in: 1800, ...overrides };
+}
+
+/** Minimal fixture for the "Заявки" tab's own deferred-response tests below
+ * — full field-by-field coverage of ApplicationPriorityRead lives in
+ * adminApplications.test.ts; this file only needs enough to exercise
+ * admin.ts's tab-switch lifecycle wiring. */
+function makeApplicationItem(overrides: Partial<ApplicationPriorityRead> = {}): ApplicationPriorityRead {
+  return {
+    application: {
+      id: 1,
+      first_name: 'Иван',
+      last_name: 'Петров',
+      middle_name: null,
+      contact_data: '+7 900 000-00-00',
+      business_niche: 'Личный автомобиль',
+      company_size: 'Седан',
+      business_info: 'BMW X5',
+      task_scope: 'Разовая услуга',
+      requester_role: 'Владелец',
+      business_size: 'Один автомобиль',
+      need_scope: 'Полировка',
+      deadline: 'В течение недели',
+      task_type: 'Восстановление',
+      interested_product: 'Полировка кузова',
+      budget: '25000.00',
+      preferred_contact_method: 'Телефон',
+      preferred_contact_time: 'Утро',
+      comment: null,
+      created_at: '2026-01-10T09:00:00Z',
+      updated_at: '2026-01-10T09:00:00Z',
+    },
+    priority_score: 55,
+    priority_level: 'medium',
+    priority_label: 'Средняя',
+    reasons: [],
+    recommended_action: 'Связаться сегодня',
+    recommended_team: 'Специалист детейлинга',
+    requires_personal_manager: false,
+    ...overrides,
+  };
+}
+
+function makeApplicationList(items: ApplicationPriorityRead[]): PrioritizedApplicationList {
+  return { items, total: items.length, skip: 0, limit: 100 };
 }
 
 /** A controllable promise for deterministic "slow request resolves late"
@@ -70,6 +122,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   sessionStorage.clear();
   vi.mocked(api.getAllServices).mockResolvedValue([]);
+  vi.mocked(api.getPrioritizedApplications).mockResolvedValue({
+    items: [],
+    total: 0,
+    skip: 0,
+    limit: 100,
+  });
 });
 
 afterEach(() => {
@@ -670,5 +728,231 @@ describe('in-flight submit guard', () => {
 
     await vi.waitFor(() => expect(root.querySelector('#services-list')).not.toBeNull());
     expect(api.registerAdmin).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('section tabs (Услуги / Заявки)', () => {
+  async function renderPanel(root: HTMLElement): Promise<void> {
+    saveToken('valid-token');
+    vi.mocked(api.checkAuthStatus).mockResolvedValue(makeCheck());
+    vi.mocked(api.getCurrentAdmin).mockResolvedValue(makeAdmin());
+    renderAdmin(root);
+    await vi.waitFor(() => expect(root.querySelector('#services-list')).not.toBeNull());
+  }
+
+  it('defaults to the Услуги tab, with the Заявки panel present but hidden', async () => {
+    const root = document.createElement('div');
+    await renderPanel(root);
+
+    expect(root.querySelector('#admin-tab-services')!.getAttribute('aria-selected')).toBe('true');
+    expect(root.querySelector('#admin-tab-applications')!.getAttribute('aria-selected')).toBe(
+      'false',
+    );
+    expect(root.querySelector<HTMLElement>('#admin-panel-services')!.hidden).toBe(false);
+    expect(root.querySelector<HTMLElement>('#admin-panel-applications')!.hidden).toBe(true);
+    expect(api.getPrioritizedApplications).not.toHaveBeenCalled();
+  });
+
+  it('switching to Заявки shows that panel, hides Услуги, and lazily loads applications', async () => {
+    const root = document.createElement('div');
+    await renderPanel(root);
+
+    root.querySelector<HTMLButtonElement>('#admin-tab-applications')!.click();
+
+    expect(root.querySelector<HTMLElement>('#admin-panel-services')!.hidden).toBe(true);
+    expect(root.querySelector<HTMLElement>('#admin-panel-applications')!.hidden).toBe(false);
+    expect(root.querySelector('#admin-tab-applications')!.getAttribute('aria-selected')).toBe(
+      'true',
+    );
+    await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledWith(0, 100));
+  });
+
+  it('logout and username remain available regardless of the active tab', async () => {
+    const root = document.createElement('div');
+    await renderPanel(root);
+    root.querySelector<HTMLButtonElement>('#admin-tab-applications')!.click();
+    await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledTimes(1));
+
+    expect(root.querySelector('#logout-button')).not.toBeNull();
+    expect(root.textContent).toContain('admin');
+
+    root.querySelector<HTMLButtonElement>('#logout-button')!.click();
+    expect(root.querySelector('#login-form')).not.toBeNull();
+  });
+
+  it('switching back to Услуги does not affect the CRUD list already loaded there', async () => {
+    vi.mocked(api.getAllServices).mockResolvedValue([
+      {
+        id: 1,
+        service_name: 'Полировка',
+        budget_min: '100',
+        budget_max: '200',
+        description: null,
+        is_active: true,
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      },
+    ]);
+    const root = document.createElement('div');
+    await renderPanel(root);
+    await vi.waitFor(() => expect(root.querySelector('.setting-card')).not.toBeNull());
+
+    root.querySelector<HTMLButtonElement>('#admin-tab-applications')!.click();
+    root.querySelector<HTMLButtonElement>('#admin-tab-services')!.click();
+
+    expect(root.querySelector<HTMLElement>('#admin-panel-services')!.hidden).toBe(false);
+    expect(root.querySelector('.setting-card')).not.toBeNull();
+  });
+
+  describe('a late applications response after switching tabs', () => {
+    it('does not paint the hidden Заявки panel; Услуги stays active; reopening Заявки issues a fresh request with current data', async () => {
+      const root = document.createElement('div');
+      await renderPanel(root);
+
+      const deferred = createDeferred<PrioritizedApplicationList>();
+      vi.mocked(api.getPrioritizedApplications).mockReturnValueOnce(deferred.promise);
+
+      root.querySelector<HTMLButtonElement>('#admin-tab-applications')!.click(); // 1. open Заявки
+      await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledTimes(1)); // 2. pending
+
+      root.querySelector<HTMLButtonElement>('#admin-tab-services')!.click(); // 3. switch to Услуги
+
+      deferred.resolve(makeApplicationList([makeApplicationItem()])); // 4. old promise resolves successfully, late
+      await flush();
+
+      // 5. applications DOM must not get cards
+      expect(
+        root.querySelector<HTMLElement>('#admin-panel-applications')!.querySelector('.application-card'),
+      ).toBeNull();
+      // 6. services panel remains active
+      expect(root.querySelector<HTMLElement>('#admin-panel-services')!.hidden).toBe(false);
+      expect(root.querySelector<HTMLElement>('#admin-panel-applications')!.hidden).toBe(true);
+
+      // 7. reopening Заявки starts a new request and shows current data
+      const freshItem = makeApplicationItem();
+      vi.mocked(api.getPrioritizedApplications).mockResolvedValueOnce(
+        makeApplicationList([{ ...freshItem, application: { ...freshItem.application, first_name: 'Свежая' } }]),
+      );
+      root.querySelector<HTMLButtonElement>('#admin-tab-applications')!.click();
+      await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() =>
+        expect(
+          root.querySelector<HTMLElement>('#admin-panel-applications')!.querySelector('.application-card'),
+        ).not.toBeNull(),
+      );
+      expect(root.querySelector<HTMLElement>('#admin-panel-applications')!.textContent).toContain('Свежая');
+    });
+
+    it('a rejection arriving after switching away does not write an error state into the hidden Заявки panel', async () => {
+      const root = document.createElement('div');
+      await renderPanel(root);
+
+      const deferred = createDeferred<PrioritizedApplicationList>();
+      vi.mocked(api.getPrioritizedApplications).mockReturnValueOnce(deferred.promise);
+
+      root.querySelector<HTMLButtonElement>('#admin-tab-applications')!.click();
+      await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledTimes(1));
+
+      root.querySelector<HTMLButtonElement>('#admin-tab-services')!.click();
+
+      deferred.reject(new TypeError('Failed to fetch'));
+      await flush();
+
+      expect(root.querySelector<HTMLElement>('#admin-panel-applications')!.textContent).not.toContain(
+        'Не удалось загрузить',
+      );
+    });
+  });
+
+  describe('tab keyboard navigation', () => {
+    it('ArrowRight moves focus and selection to the next tab, cyclically', async () => {
+      const root = document.createElement('div');
+      document.body.appendChild(root);
+      await renderPanel(root);
+
+      const servicesTab = root.querySelector<HTMLButtonElement>('#admin-tab-services')!;
+      const applicationsTab = root.querySelector<HTMLButtonElement>('#admin-tab-applications')!;
+      servicesTab.focus();
+
+      servicesTab.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }),
+      );
+      expect(document.activeElement).toBe(applicationsTab);
+      expect(applicationsTab.getAttribute('aria-selected')).toBe('true');
+      expect(servicesTab.getAttribute('aria-selected')).toBe('false');
+      expect(root.querySelector<HTMLElement>('#admin-panel-applications')!.hidden).toBe(false);
+      await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledTimes(1));
+
+      applicationsTab.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }),
+      );
+      expect(document.activeElement).toBe(servicesTab); // cyclic wrap
+      expect(servicesTab.getAttribute('aria-selected')).toBe('true');
+
+      document.body.removeChild(root);
+    });
+
+    it('ArrowLeft wraps backwards, and Home/End jump to the first/last tab', async () => {
+      const root = document.createElement('div');
+      document.body.appendChild(root);
+      await renderPanel(root);
+
+      const servicesTab = root.querySelector<HTMLButtonElement>('#admin-tab-services')!;
+      const applicationsTab = root.querySelector<HTMLButtonElement>('#admin-tab-applications')!;
+
+      servicesTab.focus();
+      servicesTab.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }),
+      );
+      expect(document.activeElement).toBe(applicationsTab); // cyclic wrap backwards
+      expect(applicationsTab.getAttribute('aria-selected')).toBe('true');
+
+      applicationsTab.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }),
+      );
+      expect(document.activeElement).toBe(servicesTab);
+      expect(servicesTab.getAttribute('aria-selected')).toBe('true');
+
+      servicesTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
+      expect(document.activeElement).toBe(applicationsTab);
+      expect(applicationsTab.getAttribute('aria-selected')).toBe('true');
+
+      document.body.removeChild(root);
+    });
+
+    it('tabindex follows the selected tab (roving tabindex)', async () => {
+      const root = document.createElement('div');
+      await renderPanel(root);
+
+      const servicesTab = root.querySelector<HTMLButtonElement>('#admin-tab-services')!;
+      const applicationsTab = root.querySelector<HTMLButtonElement>('#admin-tab-applications')!;
+
+      expect(servicesTab.tabIndex).toBe(0);
+      expect(applicationsTab.tabIndex).toBe(-1);
+
+      applicationsTab.click();
+
+      expect(applicationsTab.tabIndex).toBe(0);
+      expect(servicesTab.tabIndex).toBe(-1);
+    });
+
+    it('does not intercept Enter/Space, so native button activation keeps working alongside the mouse', async () => {
+      const root = document.createElement('div');
+      await renderPanel(root);
+      const applicationsTab = root.querySelector<HTMLButtonElement>('#admin-tab-applications')!;
+
+      const enterEvent = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+      applicationsTab.dispatchEvent(enterEvent);
+      expect(enterEvent.defaultPrevented).toBe(false);
+
+      const spaceEvent = new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true });
+      applicationsTab.dispatchEvent(spaceEvent);
+      expect(spaceEvent.defaultPrevented).toBe(false);
+
+      // Click is what a real browser fires when Enter/Space activate a <button>.
+      applicationsTab.click();
+      expect(applicationsTab.getAttribute('aria-selected')).toBe('true');
+      expect(root.querySelector<HTMLElement>('#admin-panel-applications')!.hidden).toBe(false);
+    });
   });
 });

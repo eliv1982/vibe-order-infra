@@ -21,6 +21,7 @@ import type {
   AuthCheckResponse,
   BehaviorMetricCreatePayload,
   BehaviorMetricRead,
+  PrioritizedApplicationList,
   TokenResponse,
 } from './types';
 import { clearToken, getToken } from './tokenStorage';
@@ -148,6 +149,12 @@ export const api = {
 
   createApplication: (payload: ApplicationCreatePayload) =>
     post<ApplicationRead>('/applications', payload),
+  getPrioritizedApplications: (skip = 0, limit = 100) => {
+    const params = new URLSearchParams({ skip: String(skip), limit: String(limit) });
+    return get<PrioritizedApplicationList>(`/applications/prioritized?${params.toString()}`, {
+      auth: true,
+    });
+  },
 
   createBehaviorMetric: (payload: BehaviorMetricCreatePayload) =>
     post<BehaviorMetricRead>('/behavior-metrics', payload),
