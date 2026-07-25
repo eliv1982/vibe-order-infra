@@ -2,16 +2,20 @@
 
 Учебный full-stack проект приема и обработки клиентских заявок для премиального
 автомобильного детейлинга (AUREL Detailing). Включает клиентский frontend,
-backend на FastAPI, PostgreSQL, сбор агрегированных behavior metrics, Nginx
-как reverse proxy и static server, HTTPS, Docker Compose, приватный Docker
-Registry, Watchtower и pgAdmin.
+административную панель (JWT-аутентификация, CRUD услуг, обработка и
+приоритизация заявок, поведенческая аналитика), backend на FastAPI,
+PostgreSQL, сбор агрегированных behavior metrics, Nginx как reverse proxy и
+static server, HTTPS, Docker Compose, приватный Docker Registry, Watchtower и
+pgAdmin.
 
 Проект учебный, но архитектура и security-подход сделаны в production-like
-стиле: минимальный набор публичных портов, allowlist на уровне Nginx,
-разделение Docker-сетей, лимиты ресурсов, версии образов зафиксированы,
-секреты не хранятся в git. Локальный репозиторий остается источником истины
-для конфигурации: секреты (`.env`, `registry/auth/htpasswd`, TLS-ключи) на
-VPS создаются/монтируются отдельно и в git не попадают.
+стиле: минимальный набор публичных портов, allowlist на уровне Nginx по
+`/api/`-префиксам (реальную авторизацию — public/protected, JWT — выполняет
+сам backend, а не Nginx), разделение Docker-сетей, лимиты ресурсов, версии
+образов зафиксированы, секреты не хранятся в git. Локальный репозиторий
+остается источником истины для конфигурации: секреты (`.env`,
+`registry/auth/htpasswd`, TLS-ключи) на VPS создаются/монтируются отдельно и
+в git не попадают.
 
 Публичный сайт: **https://vibe.elivcloud.org**
 
@@ -49,12 +53,25 @@ host (backend, PostgreSQL, Registry сегодня так и сделаны, с�
   push/pull smoke-test пройден (подробности — в разделе "Почему так").
 - **PostgreSQL / pgAdmin**: 5432 наружу не публикуется; pgAdmin проверен
   через SSH-туннель и остановлен после проверки.
-- **Backend + frontend**: реализованы, задеплоены, ручная end-to-end
-  приемка пройдена (см. раздел "Ручная end-to-end приемка" ниже).
+- **Backend + frontend (базовый функционал)**: реализованы, задеплоены,
+  ручная end-to-end приемка пройдена (см. раздел "Ручная end-to-end
+  приемка" ниже) — публичная форма заявки, behavior metrics, список
+  активных услуг.
+- **Административная панель, JWT-аутентификация, приоритизация заявок и
+  поведенческая аналитика** (ветка `feature/final-admin-analytics`):
+  реализованы и покрыты тестами локально — backend suite на реальной
+  PostgreSQL: **355 passed**, frontend suite: **447 passed**.
+  Nginx-конфигурация для публикации `/admin` и финального API surface
+  подготовлена в рамках deployment-preparation этапа этой ветки (см. "API и
+  публичный security allowlist" и "Nginx" ниже), но **сам деплой этой
+  функциональности на VPS в рамках данной сессии не выполнялся** — см.
+  "Production smoke checklist" и "Порядок деплоя" ниже для процедуры перед
+  reload на боевом сервере (обязателен backup PostgreSQL до обновления, см.
+  "Ограничение: развертывание базы данных" ниже).
 
 Не сделано осознанно (см. "Security notes / ограничения" ниже): HSTS,
-автоматизация продления сертификата, Alembic-миграции, серверная auth для
-административного интерфейса, Watchtower opt-in для backend.
+автоматизация продления сертификата, Alembic-миграции, Watchtower opt-in
+для backend.
 
 ## Архитектура
 
@@ -127,7 +144,8 @@ vibe-order-infra/
 │   │   ├── models/          # SQLAlchemy ORM: Application, BehaviorMetric, AdminSetting
 │   │   ├── schemas/         # Pydantic Create/Update/Read + бизнес-валидация
 │   │   ├── crud/            # доступ к БД, без HTTP-специфики
-│   │   ├── routes/          # HTTP-обработчики (/api/applications, /api/behavior-metrics, /api/admin-settings)
+│   │   ├── routes/          # HTTP-обработчики (/api/applications, /api/behavior-metrics,
+│   │   │                    #   /api/admin-settings, /api/auth, /api/analytics)
 │   │   └── main.py          # FastAPI app, lifespan (create_all), сборка /api-роутера
 │   ├── tests/                # pytest: unit (schemas, db safety guard) + integration (реальный PostgreSQL)
 │   ├── Dockerfile
@@ -136,7 +154,7 @@ vibe-order-infra/
 │   ├── src/
 │   │   ├── api/              # fetch-клиент к /api, типы запросов/ответов
 │   │   ├── metrics/          # агрегированные behavior metrics (без сторонних сервисов)
-│   │   ├── pages/            # home (клиентская страница), admin (код есть, но не публикуется), notFound
+│   │   ├── pages/            # home (клиентская страница), admin (панель, /admin, JWT), notFound
 │   │   ├── utils/             # форматирование бюджета, экранирование HTML
 │   │   ├── router.ts          # минимальный pathname-роутер без внешней библиотеки
 │   │   ├── main.ts
@@ -228,52 +246,112 @@ vibe-order-infra/
   (например, ее деактивировали между загрузкой страницы и отправкой) форма
   снова скрывается.
 
-Код учебной admin-страницы (`frontend/src/pages/admin.ts`) присутствует в
-frontend-бандле и отвечает клиентскому роуту `/admin`, но на текущем
-deployment этот путь заблокирован на уровне Nginx
-(`location ^~ /admin { return 404; }`) — до реализации полноценной
-серверной аутентификации/авторизации административный интерфейс намеренно
-не публикуется.
+Административная страница (`frontend/src/pages/admin.ts`) отвечает
+клиентскому роуту `/admin` и публикуется Nginx как обычный SPA-путь
+(`location = /admin` / `location = /admin/`, см. "Nginx" ниже) — сам Nginx
+никакой авторизации не делает, ей полностью занимается backend через JWT:
+
+- `GET /api/auth/check` — есть ли уже созданный администратор;
+- пока администратора нет — форма регистрации первого администратора
+  (`POST /api/auth/register`), после чего endpoint регистрации перестает
+  разрешать создание следующего первого admin (см. "First production admin"
+  ниже);
+- иначе — форма входа (`POST /api/auth/login`), токен хранится в
+  `sessionStorage` (не `localStorage`, чтобы забытая открытой вкладка не
+  держала сессию бессрочно) и прикладывается как `Authorization: Bearer` к
+  защищенным запросам; `GET /api/auth/me` подтверждает валидность сессии
+  при каждой загрузке страницы.
+
+После входа административная панель состоит из трех вкладок:
+
+- **Услуги** — CRUD активных/неактивных услуг (`/api/admin-settings`);
+- **Заявки** — список/поиск/фильтр заявок по приоритету
+  (`/api/applications`, `/api/applications/prioritized`) и карточка
+  заявки;
+- **Статистика** — поведенческая аналитика (`/api/analytics/*`).
 
 ## API и публичный security allowlist
 
-Снаружи через Nginx (`vibe.elivcloud.org`, порт 443) разрешены строго 4
-exact-match пути, каждый — только со своим HTTP-методом (`limit_except`
-блокирует остальные методы на этом же пути):
+Снаружи через Nginx (`vibe.elivcloud.org`, порт 443) разрешено проксирование
+только конкретных `/api/`-сегментов, каждый — **segment-safe**: либо точный
+путь без вложенных подпутей (`location =`), либо префикс с обязательным
+завершающим `/` перед вложенным путём (`location ^~ /api/xxx/`). Простой
+широкий префикс без слэша (`^~ /api/auth`, `^~ /api/applications` и т.п.)
+здесь намеренно НЕ используется — он совпал бы не только с настоящими
+вложенными путями, но и с любым другим путём, который просто начинается с
+той же строки (`/api/authentic`, `/api/applications-archive` и т.д. — см.
+"Nginx" ниже про полный список location'ов и обоснование). Nginx здесь
+работает только как allowlist по сегменту — он НЕ проверяет JWT и НЕ
+различает методы: какие конкретные пути внутри сегмента существуют, какой
+HTTP-метод на них допустим и какие из них public/protected, решает
+исключительно backend (FastAPI route-декларации + `Depends(get_current_admin)`
+для защищенных). Всё остальное под `/api/` возвращает `404` прямо в Nginx и
+не доходит до backend.
+
+### Public/protected route matrix
+
+**Public** (без токена):
 
 | Метод | Путь |
 |---|---|
 | GET  | `/api/health` |
+| GET  | `/api/auth/check` |
+| POST | `/api/auth/register` — только пока не создан ни один администратор |
+| POST | `/api/auth/login` |
 | GET  | `/api/admin-settings/active` |
 | POST | `/api/applications` |
 | POST | `/api/behavior-metrics` |
 
-Все остальное под `/api/` возвращает `404` и не доходит до backend, в том
-числе:
+**Protected** (требуют `Authorization: Bearer <JWT>`, backend отвечает `401`
+без валидного токена). Collection- и item-маршруты разведены по отдельным
+строкам — не каждый метод в таблице применим к каждому пути:
 
-- административные CRUD-эндпоинты (`POST`/`PATCH`/`DELETE /api/admin-settings/*`,
-  `GET /api/admin-settings` без `/active`);
-- чтение списка/отдельных Applications (`GET /api/applications`,
-  `GET /api/applications/{id}`);
-- чтение BehaviorMetrics (`GET /api/behavior-metrics*`);
-- любые `PATCH`/`DELETE` над клиентскими данными.
+| Ресурс | Метод | Путь |
+|---|---|---|
+| Auth | GET | `/api/auth/me` — текущий администратор |
+| Admin settings, collection | POST | `/api/admin-settings` — создать услугу |
+| Admin settings, collection | GET | `/api/admin-settings` — полный список (не только active) |
+| Admin settings, item | GET | `/api/admin-settings/{id}` |
+| Admin settings, item | PATCH | `/api/admin-settings/{id}` |
+| Admin settings, item | DELETE | `/api/admin-settings/{id}` |
+| Applications, collection | GET | `/api/applications` — список заявок |
+| Applications, prioritized | GET | `/api/applications/prioritized` |
+| Applications, item | GET | `/api/applications/{id}` |
+| Applications, item | PATCH | `/api/applications/{id}` |
+| Applications, item | DELETE | `/api/applications/{id}` |
+| Behavior metrics, collection | GET | `/api/behavior-metrics` — список |
+| Behavior metrics, item | GET | `/api/behavior-metrics/{id}` |
+| Behavior metrics, item | PATCH | `/api/behavior-metrics/{id}` |
+| Behavior metrics, item | DELETE | `/api/behavior-metrics/{id}` |
+| Analytics, overview | GET | `/api/analytics/overview` |
+| Analytics, application detail | GET | `/api/analytics/applications/{application_id}` |
 
-Также заблокированы Nginx-ом целиком, отдельно от SPA fallback: `/admin`,
-`/docs`, `/openapi.json`, `/redoc`.
+(`POST /api/applications` и `POST /api/behavior-metrics` — создание — не
+входят сюда: это public-маршруты, см. таблицу выше. Public/protected
+границы не менялись — это только уточнение отображения уже существующей
+матрицы.)
 
-Сам backend (`routes/`) реализует полный CRUD для всех трех сущностей без
-собственной auth — это открытый учебный API, публичная безопасность
-обеспечивается исключительно allowlist-ом на уровне Nginx, а не самим
-backend.
+Также заблокированы Nginx-ом целиком, отдельно от SPA fallback: `/docs`,
+`/openapi.json`, `/redoc` и `/redoc/` (exact `/redoc` не покрывает `/redoc/`
+— это разные URI для Nginx, отдельный exact-location закрывает и его) —
+учебный API не должен светить схему эндпоинтов наружу, даже после включения
+auth. `/api/openapi.json` тоже не проксируется — падает в общий `/api/` →
+`404`, т.к. не совпадает ни с одним разрешённым сегментом. Внутри FastAPI
+OpenAPI не отключен (нужен для локальных тестов/разработки) — ограничение
+только на production-периметре Nginx.
 
-Swagger/OpenAPI (`/docs`, `/openapi.json`, `/redoc`) был временно доступен
-на этапе ручной приемки (см. раздел "Ручная end-to-end приемка"), чтобы
-вручную создать тестовые услуги и проверить активный список. После приемки
-доступ к Swagger закрыт правилами Nginx.
+Сам backend (`routes/`) реализует полный CRUD для всех сущностей и
+собственную JWT-аутентификацию (Argon2id-хэширование паролей, единственный
+источник правды о том, кто admin) — Nginx не дублирует эту матрицу через
+`limit_except`/`auth_request`, чтобы не было двух независимых мест, решающих
+одно и то же.
 
-Административный интерфейс (frontend `/admin` и backend admin-settings CRUD)
-намеренно не защищен полноценной authentication/authorization — до
-реализации этого механизма он не публикуется наружу ни в каком виде.
+`/admin` и `/admin/` (frontend SPA, exact-match) публикуются как обычный
+статический путь — сама страница делает клиентский auth-gate через те же
+`/api/auth/*` эндпоинты (см. "Frontend" выше). Более глубокие подпути вида
+`/admin/whatever` не заблокированы отдельно — они попадают в общий SPA
+fallback (см. "Nginx" ниже) и получают тот же `200` с `index.html`, что и
+любой другой нераспознанный frontend-путь.
 
 ## Nginx
 
@@ -285,26 +363,60 @@ Swagger/OpenAPI (`/docs`, `/openapi.json`, `/redoc`) был временно д�
   TLSv1.2 TLSv1.3` заданы один раз глобально в `nginx.conf`.
 - **Статика**: собранный frontend (`frontend/dist`) раздается напрямую как
   webroot (`root /usr/share/nginx/html`).
-- **SPA fallback** (`try_files $uri $uri/ /index.html`) применяется только к
-  клиентским frontend-маршрутам — технические пути `/api/*`, `/admin`,
-  `/docs`, `/openapi.json`, `/redoc` заблокированы отдельными
-  `location`-блоками с более высоким приоритетом (exact-match и `^~`
-  префиксы всегда обгоняют `location /`), поэтому в SPA fallback они не
-  попадают.
+- **`/admin` SPA-роут**: точные `location = /admin` и `location = /admin/`
+  отдают тот же `index.html`, что и `/` (`try_files /index.html =404;`) —
+  это гарантирует, что прямой refresh на `/admin`/`/admin/` работает явным
+  правилом, а не как побочный эффект общего SPA fallback. Более глубокие
+  подпути (`/admin/whatever`) НЕ покрыты этим exact-match и намеренно НЕ
+  блокируются отдельно — они проваливаются в общий SPA fallback ниже и
+  получают тот же `200` с `index.html`, что и любой другой нераспознанный
+  frontend-путь; клиентский `router.ts` резолвит их в `'not-found'` уже на
+  стороне браузера. Query string не мешает совпадению (Nginx матчит
+  `location` по URI без query part).
+- **SPA fallback** (`try_files $uri $uri/ /index.html`) применяется ко всем
+  остальным нераспознанным frontend-путям (включая `/admin/whatever`) —
+  технические пути `/api/*`, `/docs`, `/openapi.json`, `/redoc`, `/redoc/`
+  заблокированы отдельными `location`-блоками с более высоким приоритетом
+  (`=`/`^~` префиксы всегда обгоняют `location /`), поэтому в SPA fallback
+  они не попадают.
 - **`/assets/`** (хэшированные Vite JS/CSS/шрифты) — честный `404` при
   отсутствии файла (`try_files $uri =404`), а не подмена на `index.html` с
   200.
-- **API allowlist** реализован exact-match location'ами (см. раздел выше) с
-  `limit_except` по методу.
+- **API allowlist** реализован segment-safe: для каждого допустимого
+  эндпоинта — либо `location =` (пути без вложенных подпутей: `/api/health`,
+  коллекции `/api/admin-settings`/`/api/applications`/`/api/behavior-metrics`),
+  либо `location ^~ /api/xxx/` с обязательным завершающим `/` перед вложенным
+  путём (`/api/auth/`, `/api/admin-settings/`, `/api/applications/`,
+  `/api/behavior-metrics/`, `/api/analytics/`). Обязательный `/` в
+  префиксных location'ах — принципиальный момент: без него `^~ /api/auth`
+  пропустил бы также `/api/authentic`, `^~ /api/applications` — также
+  `/api/applications-archive`, и т.д. (см. "API и публичный security
+  allowlist" выше про полную route matrix). Без `limit_except` — метод/
+  public-protected различает сам backend, а не Nginx. Всё прочее под
+  `/api/` — `404` через `location ^~ /api/ { return 404; }`, включая
+  exact-пути без реального backend-эндпоинта на них (`/api/auth`,
+  `/api/analytics`) и любые pseudo-похожие сегменты
+  (`/api/healthcheck`, `/api/admin-settings-old` и т.п.).
 - Backend проксируется по внутреннему Docker DNS-имени сервиса —
   `proxy_pass http://backend:8000;` (без переменной/резолвера, имя
   разрешается при старте/reload Nginx внутри `proxy-net`; глобального
   `resolver` в `nginx.conf` нет, поэтому Nginx требует, чтобы `backend` уже
   существовал в момент старта — это выражено через `depends_on: - backend`
   в `docker-compose.yml`).
-- `server_tokens off;`, `X-Content-Type-Options: nosniff` и
-  `Referrer-Policy` — во всех активных server-блоках (подробнее — в разделе
-  "Почему так").
+- **Body size**: `client_max_body_size` НЕ задан глобально в `nginx.conf`
+  (глобальный `0` убран как production-blocker — реальные payload'ы этого
+  сайта на порядки меньше 1 МБ). Основной сайт (`vibe.elivcloud.org`,
+  443-блок) задает собственный `client_max_body_size 1m;`, покрывающий форму
+  заявки, behavior-metrics, auth и административный API. Docker Registry
+  сохраняет свой unlimited `client_max_body_size 0;` (без ограничения —
+  крупные слои образов), заданный на уровне HTTPS `server{}` (443) целиком —
+  изолированно в отдельном vhost-файле `registry-vibe.elivcloud.org.conf` —
+  он не наследуется основным сайтом, т.к. это отдельный `server{}` в
+  отдельном файле, и основной сайт не наследует Registry limit.
+- `server_tokens off;`, `X-Content-Type-Options: nosniff`, `X-Frame-Options:
+  DENY` (защита от clickjacking — актуальна с публикацией `/admin`) и
+  `Referrer-Policy` — во всех активных server-блоках `vibe.elivcloud.org.conf`
+  (подробнее — в разделе "Почему так").
 
 ## Docker Compose
 
@@ -359,10 +471,35 @@ label выставлен в `"false"` у всех сервисов — авто�
   backend-специфичных переменных не требуется).
 - `PGADMIN_DEFAULT_EMAIL`, `PGADMIN_DEFAULT_PASSWORD` (нужны, только если
   запускается профиль `admin`, но объявлены обязательными и там).
+- `JWT_SECRET_KEY` — секрет для подписи JWT (`app/core/config.py`,
+  `Settings.jwt_secret_key`). Объявлен в `docker-compose.yml` как
+  `${JWT_SECRET_KEY:?JWT_SECRET_KEY is required}` — без fallback, т.к.
+  отсутствующий/пустой секрет не должен незаметно запустить backend с
+  предсказуемым JWT. Требования к значению (проверяются самим Settings при
+  старте backend, а не только документацией):
+  - минимум 32 символа (`Field(..., min_length=32)`);
+  - не должен совпадать с известными placeholder-значениями (`changeme`,
+    `secret`, значение из `.env.example` и т.п.) — Settings явно отклонит
+    такой секрет при старте.
+  Сгенерировать реальный секрет локально, любой вариант:
+  ```bash
+  openssl rand -hex 32
+  # или
+  python -c "import secrets; print(secrets.token_urlsafe(64))"
+  ```
+  **Не коммитить** реальное значение в git ни в каком виде. На VPS секрет
+  хранится только в `.env` (не в самом repo) с правами `600`:
+  ```bash
+  chmod 600 .env
+  ```
 
-Необязательна (есть безопасное значение по умолчанию):
+Необязательны (есть безопасные значения по умолчанию, совпадающие с
+`Settings` в `app/core/config.py`):
 
 - `WATCHTOWER_POLL_INTERVAL` (по умолчанию 86400с = раз в сутки).
+- `JWT_ALGORITHM` (по умолчанию `HS256`; допустимы только симметричные
+  HMAC-варианты — `HS256`/`HS384`/`HS512`).
+- `ACCESS_TOKEN_EXPIRE_MINUTES` (по умолчанию `30`).
 
 Registry свои учетные данные из `.env` не берет — см. "Почему так".
 
@@ -404,7 +541,8 @@ pytest
 
 (Реальные учетные данные здесь не публикуются — подставляются локально.)
 
-Итог прогона против отдельной реальной PostgreSQL test-базы: **44 passed**.
+Итог прогона против отдельной реальной PostgreSQL test-базы (включая auth,
+admin CRUD, приоритизацию заявок и analytics): **355 passed**.
 
 ### Frontend
 
@@ -416,7 +554,7 @@ npm run build
 npm audit
 ```
 
-Итог: **62 tests passed**, `npm run build` — успешно, `npm audit` — **0
+Итог: **447 tests passed**, `npm run build` — успешно, `npm audit` — **0
 vulnerabilities**. Покрытие тестами (coverage) не измерялось — количество
 тестов не эквивалентно проценту покрытия кода.
 
@@ -468,28 +606,33 @@ docker run --rm -v "$PWD/frontend:/app" -w /app node:22-slim sh -c "npm ci && np
 порядка (certbot на VPS, затем перезапуск Nginx); на текущем VPS уже
 выполнен.
 
-### Обновление / повторный деплой (текущий flow, с backend + frontend)
+### Обновление / повторный деплой (текущий flow, с backend + frontend + admin/analytics)
 
-1. `git pull`/`git fetch` — обновить репозиторий на VPS.
-2. `docker compose config --quiet` — убедиться, что `.env` полон и
-   конфигурация валидна, до запуска чего-либо.
-3. Собрать backend-образ: `docker compose build backend`.
-4. Поднять/пересоздать backend: `docker compose up -d backend` (Compose
-   дождется `postgres` healthy благодаря `depends_on`).
-5. Собрать frontend вне хоста — временным официальным Node-контейнером
+1. **Backup PostgreSQL — обязателен перед этим конкретным обновлением**, т.к.
+   оно добавляет новую таблицу `admins` через `Base.metadata.create_all()`
+   (Alembic пока не используется — см. "Ограничение: развертывание базы
+   данных" ниже). Не переходить к шагу 2, пока backup-файл не создан и не
+   проверен непустым.
+2. `git pull`/`git fetch` — обновить репозиторий на VPS.
+3. `docker compose config --quiet` — убедиться, что `.env` полон (включая
+   `JWT_SECRET_KEY`) и конфигурация валидна, до запуска чего-либо.
+4. Собрать backend-образ: `docker compose build backend`.
+5. Поднять/пересоздать backend: `docker compose up -d backend` (Compose
+   дождется `postgres` healthy благодаря `depends_on`). При старте backend
+   вызовет `Base.metadata.create_all()` — создаст отсутствующую таблицу
+   `admins`, существующие таблицы/данные не затрагивает.
+6. Собрать frontend вне хоста — временным официальным Node-контейнером
    (см. "Production build frontend" выше) — `frontend/dist` обновляется на
    хосте.
-6. Пересоздать/перезапустить `nginx` только если менялся сам bind mount
-   (новый `frontend/dist`) или конфигурация (`nginx.conf`/`conf.d/*`) —
-   иначе можно оставить как есть, так как `frontend/dist` монтируется как
-   bind mount, а не встраивается в образ.
-7. `nginx -t` — проверить синтаксис конфигурации перед reload/restart, если
-   она менялась.
-8. Smoke tests: убедиться, что allowlisted `/api/*` пути отвечают, а
-   заблокированные пути (`/admin`, `/docs`, `GET /api/applications` и т.п.)
-   получают 403/404.
-9. `docker compose ps` — все сервисы в статусе `running`/`healthy`.
-10. `docker stats --no-stream` — сверить фактическое потребление
+7. Пересоздать/перезапустить `nginx` — конфигурация в этом релизе меняется
+   (body limit, `/admin`, финальный API allowlist), поэтому это обязательный
+   шаг, а не опциональный.
+8. `nginx -t` — проверить синтаксис конфигурации перед reload/restart.
+9. Smoke tests — см. "Production smoke checklist" ниже (публикация `/admin`,
+   первый admin, protected API без токена → `401`, `/docs`/`/openapi.json`/
+   `/redoc` снаружи недоступны и т.д.).
+10. `docker compose ps` — все сервисы в статусе `running`/`healthy`.
+11. `docker stats --no-stream` — сверить фактическое потребление
     памяти/CPU с лимитами (особенно важно теперь, когда backend добавлен в
     набор постоянно работающих сервисов — см. "Resource protection").
 
@@ -497,9 +640,80 @@ docker run --rm -v "$PWD/frontend:/app" -w /app node:22-slim sh -c "npm ci && np
 обновления — он остановил бы все сервисы разом вместо контролируемого
 поочередного обновления.
 
+## Ограничение: развертывание базы данных (Alembic отсутствует)
+
+- Alembic-миграции в проекте пока не используются.
+- Backend вызывает `Base.metadata.create_all()` при старте (`lifespan` в
+  `app/main.py`) — этот вызов создает только отсутствующие таблицы и НЕ
+  удаляет и не изменяет существующие таблицы/данные.
+- При первом запуске версии backend с этой ветки на существующей
+  production-базе будет создана недостающая таблица `admins` — остальные
+  таблицы (`applications`, `behavior_metrics`, `admin_settings`) и их данные
+  остаются нетронутыми.
+- Тем не менее, **перед обновлением production обязателен backup
+  PostgreSQL** — `create_all()` осознанно принят для текущего учебного этапа
+  именно при этом условии, а не как замена миграциям в общем случае.
+- Для полноценного production-grade развития схемы БД в дальнейшем
+  запланирован переход на Alembic (см. "Дальше по плану").
+
+Backup — вне репозитория, с конкретным именем файла (без wildcard), без
+раскрытия credentials в самой команде (значения читаются из переменных
+окружения контейнера `postgres` через `$POSTGRES_USER`/`$POSTGRES_DB`
+внутри контейнера, не подставляются в текст команды на хосте):
+
+```bash
+backup_dir="$HOME/vibe-order-infra-backups"
+install -d -m 700 "$backup_dir"
+
+backup_file="$backup_dir/backup-before-admin-analytics-$(date +%Y%m%d-%H%M%S).sql"
+
+docker compose exec -T postgres sh -c \
+  'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' \
+  > "$backup_file"
+
+test -s "$backup_file"
+ls -lh "$backup_file"
+```
+
+`$backup_file` — единственная переменная, указывающая на конкретный,
+только что созданный файл: последующая проверка (`test -s`) относится
+именно к нему, а не к произвольному файлу, попавшему под маску. Каталог
+`$HOME/vibe-order-infra-backups` — вне рабочей копии репозитория (не
+коммитится и не может быть случайно закоммичен), права `700` ограничивают
+доступ к бэкапам (внутри — дамп БД, потенциально чувствительные данные
+заявок) только владельцу.
+
+**Если `test -s "$backup_file"` возвращает ненулевой код (файла нет или он
+пустой) — НЕ продолжать деплой.** Это жёсткий стоп-критерий, не
+рекомендация: `Base.metadata.create_all()` не заменяет полноценные
+миграции (см. выше), и без подтверждённого непустого backup откатываться
+в случае проблемы с обновлением будет нечем. Сам процесс НЕ включает
+автоматический rollback — восстановление из `$backup_file` в случае
+проблемы выполняется вручную (`psql`/`pg_restore` по обстоятельствам), это
+не одношаговая операция и не описывается здесь как таковая.
+
+## First production admin
+
+После деплоя этой ветки на VPS (см. "Обновление / повторный деплой" выше):
+
+1. Открыть `https://vibe.elivcloud.org/admin` в браузере.
+2. Т.к. администраторов еще нет (`GET /api/auth/check` вернет
+   `admin_exists: false`), страница покажет форму регистрации первого
+   администратора — заполнить имя пользователя и пароль.
+3. После успешной регистрации (`POST /api/auth/register`) endpoint
+   регистрации перестает разрешать создание следующего первого admin —
+   повторный `POST /api/auth/register` вернет `409 Conflict` независимо от
+   переданных данных.
+4. Все последующие входы — через `POST /api/auth/login` (форма входа на
+   `/admin`), пароли хранятся в виде Argon2id-хэша.
+
+Реальные production username/password в README не публикуются.
+
 ## Ручная end-to-end приемка
 
-Функциональный сценарий, пройденный вручную end-to-end на VPS:
+Функциональный сценарий, пройденный вручную end-to-end на VPS (до
+`feature/final-admin-analytics` — на состоянии проекта без admin-панели,
+JWT-auth и analytics):
 
 - Через Swagger (на момент тестового этапа, до закрытия `/docs`) создано 3
   услуги в `admin_settings`.
@@ -520,7 +734,9 @@ docker run --rm -v "$PWD/frontend:/app" -w /app node:22-slim sh -c "npm ci && np
   `clicked_buttons`, `cursor_hover_data`, `return_count` — без содержимого
   полей формы и без точных координат курсора.
 
-Security smoke-tests (выполнены снаружи, через публичный домен):
+Security smoke-tests (выполнены снаружи, через публичный домен, на ТОМ этапе,
+т.е. до этой ветки — тогда `/admin` и весь admin API были жестко закрыты
+Nginx, т.к. серверной auth еще не было):
 
 - `GET /api/applications` (список заявок) — заблокирован.
 - `GET /api/applications/{id}` (отдельная заявка) — заблокирован.
@@ -534,10 +750,83 @@ Security smoke-tests (выполнены снаружи, через публич
   недоступны снаружи Docker-сети в принципе, а не только по правилам
   Nginx.
 
+Эта историческая запись **больше не описывает текущую Nginx-конфигурацию**:
+начиная с `feature/final-admin-analytics` `/admin` и admin API публикуются
+(защищены JWT на уровне backend, а не 404 в Nginx) — см. "API и публичный
+security allowlist" выше. Свежий smoke-test для этой функциональности на VPS
+пока не проводился — см. "Production smoke checklist" ниже.
+
+## Production smoke checklist
+
+Проверки для выполнения на VPS **после** деплоя этой ветки (не выполнены в
+рамках данной deployment-preparation сессии — эта сессия не подключалась к
+VPS и не проводила production-деплой):
+
+Перед деплоем:
+
+- [ ] `docker compose config` (и `--profile admin config`) проходит без
+      ошибок с реальным `.env` на VPS.
+- [ ] `nginx -t` проходит на самом VPS перед `reload`/`restart` Nginx —
+      обязателен независимо от любых локальных проверок конфигурации.
+- [ ] Backup PostgreSQL создан и подтверждён непустым (`test -s
+      "$backup_file"`) — см. "Ограничение: развертывание базы данных". Без
+      этого деплой не продолжается.
+
+Функциональные проверки после деплоя:
+
+- [ ] `/` открывается по HTTPS.
+- [ ] `/admin` открывается и работает при прямом refresh страницы (без 404).
+- [ ] Административная авторизация — полный цикл:
+      - [ ] регистрация первого администратора (`POST /api/auth/register`)
+        проходит успешно;
+      - [ ] повторная регистрация первого admin получает ожидаемый отказ
+        (`409 Conflict`, а не повторное создание);
+      - [ ] logout (кнопка "Выйти" в `/admin`) очищает JWT из
+        `sessionStorage` и возвращает UI на экран входа (не оставляет
+        доступным ни один protected-раздел панели без повторной
+        аутентификации);
+      - [ ] повторный login (`POST /api/auth/login`) после logout снова
+        работает и восстанавливает доступ к панели.
+- [ ] Публичная форма заявки (`POST /api/applications`) и behavior metrics
+      (`POST /api/behavior-metrics`) работают без токена.
+- [ ] Protected API без токена (например `GET /api/applications`,
+      `GET /api/analytics/overview`) возвращает `401`, а не 200/404.
+- [ ] CRUD услуг (`/api/admin-settings`) работает из `/admin` под валидным
+      токеном.
+- [ ] Заявки: список/поиск/фильтр по приоритету и приоритизация
+      (`GET /api/applications/prioritized`, scoring reasons) отображаются в
+      `/admin`.
+- [ ] Статистика за день/неделю/месяц (`GET /api/analytics/overview?period=`)
+      отображается во вкладке "Статистика".
+- [ ] Detail-аналитика заявки, у которой ЕСТЬ behavior metrics
+      (`GET /api/analytics/applications/{application_id}`), отображает
+      реальные агрегаты.
+- [ ] Detail-аналитика заявки, у которой НЕТ behavior metrics (сабмит без
+      последующего `POST /api/behavior-metrics`), отображает пустое
+      состояние, а не ошибку.
+- [ ] `/docs`, `/docs/`, `/redoc`, `/redoc/`, `/openapi.json`,
+      `/api/openapi.json` снаружи недоступны (`404`).
+- [ ] Registry (`registry-vibe.elivcloud.org`) требует аутентификацию —
+      запрос к `/v2/` без креденшлов возвращает `401` с Basic auth challenge.
+- [ ] pgAdmin доступен только через `127.0.0.1:5050` на самом VPS — не
+      слушает внешний интерфейс, доступ с локальной машины только через
+      SSH-туннель (см. "pgAdmin" в разделе "Почему так").
+- [ ] Backend (`:8000`) и PostgreSQL (`:5432`) не публикуют портов на host
+      наружу (`docker compose port backend 8000` / аналогичная проверка не
+      находит публичного маппинга).
+
+Здоровье инфраструктуры после запуска:
+
+- [ ] `docker compose ps` — все сервисы в статусе `running`/`healthy`.
+- [ ] Свежие логи каждого сервиса после запуска не содержат неожиданных
+      ошибок/трейсбэков (`docker compose logs --tail=100 <service>` —
+      особенно `backend` и `nginx`).
+
 ## Скриншоты / результаты
 
 Файлы скриншотов в репозитории отсутствуют — здесь только перечислены
-сценарии, подтвержденные скриншотами при сдаче:
+сценарии, подтвержденные скриншотами при сдаче предыдущего этапа (до
+`feature/final-admin-analytics`):
 
 - Swagger: `POST /api/admin-settings` (создание услуги).
 - Swagger: `GET /api/admin-settings/active` (список активных услуг).
@@ -547,6 +836,13 @@ Security smoke-tests (выполнены снаружи, через публич
 - Frontend: успешная отправка заявки.
 - PostgreSQL: содержимое таблицы `applications`.
 - PostgreSQL: содержимое таблицы `behavior_metrics`.
+
+Скриншоты для admin-панели/auth/analytics (регистрация первого
+администратора, вход, CRUD услуг, список/приоритизация заявок, статистика
+день/неделя/месяц, detail-метрики заявки) появятся после реального
+server-side E2E прогона этой ветки на VPS — точные имена файлов определим
+по итогам этого прогона, не раньше. Production deployment этой ветки в
+рамках текущей сессии **не выполнялся**.
 
 ## Почему так
 
@@ -750,27 +1046,32 @@ json-file` с `max-size: "10m"`, `max-file: "3"` — до ~30MB логов на
 Текущее состояние:
 
 - Admin-роут (frontend `/admin`) и admin CRUD (backend
-  `/api/admin-settings/*` кроме `/active`) существуют в коде, но не
-  публикуются наружу — заблокированы правилами Nginx.
-- Полноценная authentication/authorization для административного
-  интерфейса — следующий этап, пока не реализована.
-- Swagger/OpenAPI/Redoc закрыты Nginx после ручной приемки; backend сам их
-  не защищает.
+  `/api/admin-settings/*` и т.д.) публикуются через Nginx и защищены JWT-
+  аутентификацией на уровне самого backend (Argon2id-хэши паролей,
+  `Depends(get_current_admin)` на каждом protected route) — см. "API и
+  публичный security allowlist". Сам деплой этой конфигурации на VPS в
+  рамках данной сессии не выполнялся, см. "Production smoke checklist".
+- Swagger/OpenAPI/Redoc закрыты Nginx на production-периметре независимо от
+  auth-стадии — backend их сам не защищает и не отключает (нужны для
+  локальной разработки/тестов).
 - Автоматические миграции БД через Alembic пока не внедрены;
   `Base.metadata.create_all()` — осознанное решение для текущего учебного
-  этапа, не рассчитанное на эволюцию схемы в проде.
+  этапа, принятое строго при условии обязательного backup PostgreSQL перед
+  каждым обновлением production (см. "Ограничение: развертывание базы
+  данных").
 - Behavior-аналитика — первого рода (без сторонних сервисов), локальна и
   агрегирована; точные координаты курсора и содержимое полей формы не
   собираются.
-- Секреты (`.env`, `registry/auth/htpasswd`, TLS-ключи) не хранятся в git —
-  создаются/монтируются на VPS отдельно.
+- Секреты (`.env`, `registry/auth/htpasswd`, TLS-ключи, `JWT_SECRET_KEY`) не
+  хранятся в git — создаются/монтируются на VPS отдельно, `.env` — с правами
+  `600`.
 - HSTS не включен, автопродление сертификата Let's Encrypt не
   автоматизировано, Watchtower не обновляет автоматически ни один сервис
   (opt-in выключен везде, включая backend).
 
 Проект в целом — учебный: инфраструктура и подход к security сделаны
-production-like, но проект не претендует на полную production-readiness
-(нет auth на admin, нет миграций схемы, нет автообновления сертификата).
+production-like, но проект не претендует на полную production-readiness (нет
+миграций схемы через Alembic, нет автообновления сертификата).
 
 ## Отличия от буквальной формулировки задания
 
@@ -801,12 +1102,16 @@ production-like, но проект не претендует на полную p
 
 ## Дальше по плану
 
-Bootstrap, HTTPS, Registry-smoke-test, backend и frontend уже реализованы и
-прошли приемку (см. "Ручная end-to-end приемка"). Из содержательного
-остается:
+Bootstrap, HTTPS, Registry-smoke-test, базовый backend/frontend (публичная
+форма, behavior metrics) уже реализованы, задеплоены и прошли приемку (см.
+"Ручная end-to-end приемка"). Административная панель, JWT-auth,
+приоритизация заявок и analytics реализованы и покрыты тестами локально на
+ветке `feature/final-admin-analytics`, Nginx подготовлен к их публикации.
+Из содержательного остается:
 
-1. Реализовать серверную authentication/authorization для административного
-   интерфейса и только после этого открыть `/admin` и admin-CRUD наружу.
+1. Задеплоить эту ветку на VPS (backup PostgreSQL → обновление backend →
+   пересборка frontend → reload Nginx) и пройти "Production smoke checklist"
+   — см. "Порядок деплоя".
 2. Внедрить Alembic-миграции вместо `Base.metadata.create_all()` — нужно
    для безопасной эволюции схемы БД в будущем.
 3. Точечный opt-in Watchtower-label для backend (stateless, безопаснее
