@@ -1166,6 +1166,31 @@ describe('application behavior analytics — modal detail', () => {
     expect(analyticsEl.textContent).not.toContain('Заявки за период');
   });
 
+  it('maps known collector button/section identifiers to Russian labels in the detail modal', async () => {
+    const detail = makeAnalyticsDetail({
+      has_metrics: true,
+      clicked_buttons: [
+        { name: 'hero_cta', count: 2, share_percent: 50 },
+        { name: 'submit_application', count: 2, share_percent: 50 },
+      ],
+      section_activity: [
+        { section: 'application_form', total_duration_seconds: 30, average_duration_seconds: 15, interactions_count: 2, share_percent: 100 },
+      ],
+    });
+    vi.mocked(api.getApplicationBehaviorAnalytics).mockResolvedValueOnce(detail);
+    const container = await renderWithItems([makeItem()]);
+    container.querySelector<HTMLButtonElement>('[data-action="view"]')!.click();
+
+    const analyticsEl = container.querySelector<HTMLElement>('#application-modal-analytics-content')!;
+    await vi.waitFor(() => expect(analyticsEl.textContent).toContain('Основная кнопка на главном экране'));
+    expect(analyticsEl.textContent).toContain('Отправка заявки');
+    expect(analyticsEl.textContent).toContain('Форма заявки');
+    // The technical wire identifiers must never leak into the visible text.
+    expect(analyticsEl.textContent).not.toContain('hero_cta');
+    expect(analyticsEl.textContent).not.toContain('submit_application');
+    expect(analyticsEl.textContent).not.toContain('application_form');
+  });
+
   it('shows a neutral error message and a working retry on a non-401 failure', async () => {
     vi.mocked(api.getApplicationBehaviorAnalytics).mockRejectedValueOnce(new TypeError('Failed to fetch'));
     const container = await renderWithItems([makeItem()]);
