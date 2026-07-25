@@ -16,6 +16,9 @@ import type {
   AdminSettingCreatePayload,
   AdminSettingRead,
   AdminSettingUpdatePayload,
+  AnalyticsOverview,
+  AnalyticsPeriod,
+  ApplicationBehaviorAnalytics,
   ApplicationCreatePayload,
   ApplicationRead,
   AuthCheckResponse,
@@ -84,6 +87,22 @@ interface RequestOpts {
  * an Authorization header as "Bearer null"/"Bearer undefined"/"Bearer ". */
 function hasUsableToken(token: string | null): token is string {
   return typeof token === 'string' && token.trim().length > 0;
+}
+
+const ANALYTICS_PERIODS: readonly AnalyticsPeriod[] = ['day', 'week', 'month'];
+
+/** Frontend allowlist — never forwards an arbitrary string as the `period`
+ * query param, regardless of what a caller (or a compromised caller) passes
+ * in at runtime despite the AnalyticsPeriod compile-time type. */
+function isValidAnalyticsPeriod(value: unknown): value is AnalyticsPeriod {
+  return typeof value === 'string' && (ANALYTICS_PERIODS as readonly string[]).includes(value);
+}
+
+/** application_id is a path segment, not a query param — validated before
+ * the URL is even built so a malformed/hostile id can never end up baked
+ * into the request path. */
+function isPositiveIntegerId(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0;
 }
 
 async function request<T>(
@@ -158,6 +177,22 @@ export const api = {
 
   createBehaviorMetric: (payload: BehaviorMetricCreatePayload) =>
     post<BehaviorMetricRead>('/behavior-metrics', payload),
+
+  getAnalyticsOverview: (period: AnalyticsPeriod) => {
+    if (!isValidAnalyticsPeriod(period)) {
+      return Promise.reject(new Error('Invalid analytics period'));
+    }
+    const params = new URLSearchParams({ period });
+    return get<AnalyticsOverview>(`/analytics/overview?${params.toString()}`, { auth: true });
+  },
+  getApplicationBehaviorAnalytics: (applicationId: number) => {
+    if (!isPositiveIntegerId(applicationId)) {
+      return Promise.reject(new Error('Invalid application id'));
+    }
+    return get<ApplicationBehaviorAnalytics>(`/analytics/applications/${applicationId}`, {
+      auth: true,
+    });
+  },
 
   checkAuthStatus: () => get<AuthCheckResponse>('/auth/check'),
   registerAdmin: (payload: AdminRegisterPayload) => post<AdminRead>('/auth/register', payload),

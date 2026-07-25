@@ -5,6 +5,7 @@ import { getToken, saveToken } from '../api/tokenStorage';
 import type {
   AdminRead,
   AdminSettingRead,
+  AnalyticsOverview,
   ApplicationPriorityRead,
   AuthCheckResponse,
   PrioritizedApplicationList,
@@ -29,6 +30,8 @@ vi.mock('../api/client', async (importOriginal) => {
       createApplication: vi.fn(),
       createBehaviorMetric: vi.fn(),
       getPrioritizedApplications: vi.fn(),
+      getAnalyticsOverview: vi.fn(),
+      getApplicationBehaviorAnalytics: vi.fn(),
     },
   };
 });
@@ -96,6 +99,30 @@ function makeApplicationList(items: ApplicationPriorityRead[]): PrioritizedAppli
   return { items, total: items.length, skip: 0, limit: 100 };
 }
 
+/** Minimal fixture for admin.ts's own tab-switch lifecycle wiring — full
+ * field-by-field coverage of AnalyticsOverview lives in
+ * adminAnalytics.test.ts. */
+function makeAnalyticsOverview(overrides: Partial<AnalyticsOverview> = {}): AnalyticsOverview {
+  return {
+    period: 'week',
+    period_start: '2026-07-17T00:00:00Z',
+    period_end: '2026-07-24T00:00:00Z',
+    applications_count: 0,
+    metrics_count: 0,
+    applications_with_metrics: 0,
+    applications_without_metrics: 0,
+    average_time_on_page_seconds: null,
+    median_time_on_page_seconds: null,
+    average_return_count: null,
+    total_return_count: 0,
+    total_button_clicks: 0,
+    unique_clicked_buttons: 0,
+    popular_buttons: [],
+    section_activity: [],
+    ...overrides,
+  };
+}
+
 /** A controllable promise for deterministic "slow request resolves late"
  * tests — no arbitrary sleeps, the test decides exactly when it settles. */
 function createDeferred<T>(): {
@@ -128,6 +155,7 @@ beforeEach(() => {
     skip: 0,
     limit: 100,
   });
+  vi.mocked(api.getAnalyticsOverview).mockResolvedValue(makeAnalyticsOverview());
 });
 
 afterEach(() => {
@@ -731,7 +759,7 @@ describe('in-flight submit guard', () => {
   });
 });
 
-describe('section tabs (Услуги / Заявки)', () => {
+describe('section tabs (Услуги / Заявки / Статистика)', () => {
   async function renderPanel(root: HTMLElement): Promise<void> {
     saveToken('valid-token');
     vi.mocked(api.checkAuthStatus).mockResolvedValue(makeCheck());
@@ -740,7 +768,7 @@ describe('section tabs (Услуги / Заявки)', () => {
     await vi.waitFor(() => expect(root.querySelector('#services-list')).not.toBeNull());
   }
 
-  it('defaults to the Услуги tab, with the Заявки panel present but hidden', async () => {
+  it('defaults to the Услуги tab, with the Заявки and Статистика panels present but hidden', async () => {
     const root = document.createElement('div');
     await renderPanel(root);
 
@@ -748,12 +776,15 @@ describe('section tabs (Услуги / Заявки)', () => {
     expect(root.querySelector('#admin-tab-applications')!.getAttribute('aria-selected')).toBe(
       'false',
     );
+    expect(root.querySelector('#admin-tab-analytics')!.getAttribute('aria-selected')).toBe('false');
     expect(root.querySelector<HTMLElement>('#admin-panel-services')!.hidden).toBe(false);
     expect(root.querySelector<HTMLElement>('#admin-panel-applications')!.hidden).toBe(true);
+    expect(root.querySelector<HTMLElement>('#admin-panel-analytics')!.hidden).toBe(true);
     expect(api.getPrioritizedApplications).not.toHaveBeenCalled();
+    expect(api.getAnalyticsOverview).not.toHaveBeenCalled();
   });
 
-  it('switching to Заявки shows that panel, hides Услуги, and lazily loads applications', async () => {
+  it('switching to Заявки shows that panel, hides the others, and lazily loads applications', async () => {
     const root = document.createElement('div');
     await renderPanel(root);
 
@@ -761,10 +792,26 @@ describe('section tabs (Услуги / Заявки)', () => {
 
     expect(root.querySelector<HTMLElement>('#admin-panel-services')!.hidden).toBe(true);
     expect(root.querySelector<HTMLElement>('#admin-panel-applications')!.hidden).toBe(false);
+    expect(root.querySelector<HTMLElement>('#admin-panel-analytics')!.hidden).toBe(true);
     expect(root.querySelector('#admin-tab-applications')!.getAttribute('aria-selected')).toBe(
       'true',
     );
     await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledWith(0, 100));
+    expect(api.getAnalyticsOverview).not.toHaveBeenCalled();
+  });
+
+  it('switching to Статистика shows that panel, hides the others, and lazily loads analytics', async () => {
+    const root = document.createElement('div');
+    await renderPanel(root);
+
+    root.querySelector<HTMLButtonElement>('#admin-tab-analytics')!.click();
+
+    expect(root.querySelector<HTMLElement>('#admin-panel-services')!.hidden).toBe(true);
+    expect(root.querySelector<HTMLElement>('#admin-panel-applications')!.hidden).toBe(true);
+    expect(root.querySelector<HTMLElement>('#admin-panel-analytics')!.hidden).toBe(false);
+    expect(root.querySelector('#admin-tab-analytics')!.getAttribute('aria-selected')).toBe('true');
+    await vi.waitFor(() => expect(api.getAnalyticsOverview).toHaveBeenCalledWith('week'));
+    expect(api.getPrioritizedApplications).not.toHaveBeenCalled();
   });
 
   it('logout and username remain available regardless of the active tab', async () => {
@@ -778,6 +825,31 @@ describe('section tabs (Услуги / Заявки)', () => {
 
     root.querySelector<HTMLButtonElement>('#logout-button')!.click();
     expect(root.querySelector('#login-form')).not.toBeNull();
+  });
+
+  it('logout while on the Статистика tab clears the token and returns to login', async () => {
+    const root = document.createElement('div');
+    await renderPanel(root);
+    root.querySelector<HTMLButtonElement>('#admin-tab-analytics')!.click();
+    await vi.waitFor(() => expect(api.getAnalyticsOverview).toHaveBeenCalledTimes(1));
+
+    root.querySelector<HTMLButtonElement>('#logout-button')!.click();
+
+    expect(getToken()).toBeNull();
+    expect(root.querySelector('#login-form')).not.toBeNull();
+  });
+
+  it('a 401 while loading Статистика ends the session and shows the login form', async () => {
+    const root = document.createElement('div');
+    await renderPanel(root);
+    vi.mocked(api.getAnalyticsOverview).mockRejectedValueOnce(
+      new ApiError('Could not validate credentials', 401),
+    );
+
+    root.querySelector<HTMLButtonElement>('#admin-tab-analytics')!.click();
+
+    await vi.waitFor(() => expect(root.querySelector('#login-form')).not.toBeNull());
+    expect(getToken()).toBeNull();
   });
 
   it('switching back to Услуги does not affect the CRUD list already loaded there', async () => {
@@ -864,14 +936,67 @@ describe('section tabs (Услуги / Заявки)', () => {
     });
   });
 
+  describe('a late analytics response after switching tabs', () => {
+    it('does not paint the hidden Статистика panel; reopening it issues a fresh request with current data', async () => {
+      const root = document.createElement('div');
+      await renderPanel(root);
+
+      const deferred = createDeferred<AnalyticsOverview>();
+      vi.mocked(api.getAnalyticsOverview).mockReturnValueOnce(deferred.promise);
+
+      root.querySelector<HTMLButtonElement>('#admin-tab-analytics')!.click(); // 1. open Статистика
+      await vi.waitFor(() => expect(api.getAnalyticsOverview).toHaveBeenCalledTimes(1)); // 2. pending
+
+      root.querySelector<HTMLButtonElement>('#admin-tab-services')!.click(); // 3. switch away
+
+      deferred.resolve(makeAnalyticsOverview({ applications_count: 999 })); // 4. resolves late
+      await flush();
+
+      // 5. analytics panel must not have been painted with the stale data
+      expect(root.querySelector<HTMLElement>('#admin-panel-analytics')!.textContent).not.toContain('999');
+      // 6. services panel remains active
+      expect(root.querySelector<HTMLElement>('#admin-panel-services')!.hidden).toBe(false);
+      expect(root.querySelector<HTMLElement>('#admin-panel-analytics')!.hidden).toBe(true);
+
+      // 7. reopening Статистика starts a new request and shows current data
+      vi.mocked(api.getAnalyticsOverview).mockResolvedValueOnce(makeAnalyticsOverview({ applications_count: 7 }));
+      root.querySelector<HTMLButtonElement>('#admin-tab-analytics')!.click();
+      await vi.waitFor(() => expect(api.getAnalyticsOverview).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() =>
+        expect(root.querySelector<HTMLElement>('#admin-panel-analytics')!.textContent).toContain('7'),
+      );
+    });
+
+    it('a rejection arriving after switching away does not write an error state into the hidden Статистика panel', async () => {
+      const root = document.createElement('div');
+      await renderPanel(root);
+
+      const deferred = createDeferred<AnalyticsOverview>();
+      vi.mocked(api.getAnalyticsOverview).mockReturnValueOnce(deferred.promise);
+
+      root.querySelector<HTMLButtonElement>('#admin-tab-analytics')!.click();
+      await vi.waitFor(() => expect(api.getAnalyticsOverview).toHaveBeenCalledTimes(1));
+
+      root.querySelector<HTMLButtonElement>('#admin-tab-services')!.click();
+
+      deferred.reject(new TypeError('Failed to fetch'));
+      await flush();
+
+      expect(root.querySelector<HTMLElement>('#admin-panel-analytics')!.textContent).not.toContain(
+        'Не удалось загрузить',
+      );
+    });
+  });
+
   describe('tab keyboard navigation', () => {
-    it('ArrowRight moves focus and selection to the next tab, cyclically', async () => {
+    it('ArrowRight cycles Услуги -> Заявки -> Статистика -> Услуги, moving focus/selection and loading each lazily', async () => {
       const root = document.createElement('div');
       document.body.appendChild(root);
       await renderPanel(root);
 
       const servicesTab = root.querySelector<HTMLButtonElement>('#admin-tab-services')!;
       const applicationsTab = root.querySelector<HTMLButtonElement>('#admin-tab-applications')!;
+      const analyticsTab = root.querySelector<HTMLButtonElement>('#admin-tab-analytics')!;
       servicesTab.focus();
 
       servicesTab.dispatchEvent(
@@ -886,73 +1011,99 @@ describe('section tabs (Услуги / Заявки)', () => {
       applicationsTab.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }),
       );
-      expect(document.activeElement).toBe(servicesTab); // cyclic wrap
+      expect(document.activeElement).toBe(analyticsTab);
+      expect(analyticsTab.getAttribute('aria-selected')).toBe('true');
+      expect(applicationsTab.getAttribute('aria-selected')).toBe('false');
+      expect(root.querySelector<HTMLElement>('#admin-panel-analytics')!.hidden).toBe(false);
+      await vi.waitFor(() => expect(api.getAnalyticsOverview).toHaveBeenCalledTimes(1));
+
+      analyticsTab.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }),
+      );
+      expect(document.activeElement).toBe(servicesTab); // cyclic wrap back to the first tab
       expect(servicesTab.getAttribute('aria-selected')).toBe('true');
 
       document.body.removeChild(root);
     });
 
-    it('ArrowLeft wraps backwards, and Home/End jump to the first/last tab', async () => {
+    it('ArrowLeft wraps backwards to the last tab, and Home/End jump to the first/last tab', async () => {
       const root = document.createElement('div');
       document.body.appendChild(root);
       await renderPanel(root);
 
       const servicesTab = root.querySelector<HTMLButtonElement>('#admin-tab-services')!;
       const applicationsTab = root.querySelector<HTMLButtonElement>('#admin-tab-applications')!;
+      const analyticsTab = root.querySelector<HTMLButtonElement>('#admin-tab-analytics')!;
 
       servicesTab.focus();
       servicesTab.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }),
       );
-      expect(document.activeElement).toBe(applicationsTab); // cyclic wrap backwards
-      expect(applicationsTab.getAttribute('aria-selected')).toBe('true');
+      expect(document.activeElement).toBe(analyticsTab); // cyclic wrap backwards to the last tab
+      expect(analyticsTab.getAttribute('aria-selected')).toBe('true');
 
-      applicationsTab.dispatchEvent(
+      analyticsTab.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }),
       );
       expect(document.activeElement).toBe(servicesTab);
       expect(servicesTab.getAttribute('aria-selected')).toBe('true');
 
       servicesTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
+      expect(document.activeElement).toBe(analyticsTab);
+      expect(analyticsTab.getAttribute('aria-selected')).toBe('true');
+
+      // One more ArrowLeft from the last tab lands on the middle tab (Заявки).
+      analyticsTab.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }),
+      );
       expect(document.activeElement).toBe(applicationsTab);
       expect(applicationsTab.getAttribute('aria-selected')).toBe('true');
 
       document.body.removeChild(root);
     });
 
-    it('tabindex follows the selected tab (roving tabindex)', async () => {
+    it('tabindex follows the selected tab (roving tabindex) across all three tabs', async () => {
       const root = document.createElement('div');
       await renderPanel(root);
 
       const servicesTab = root.querySelector<HTMLButtonElement>('#admin-tab-services')!;
       const applicationsTab = root.querySelector<HTMLButtonElement>('#admin-tab-applications')!;
+      const analyticsTab = root.querySelector<HTMLButtonElement>('#admin-tab-analytics')!;
 
       expect(servicesTab.tabIndex).toBe(0);
       expect(applicationsTab.tabIndex).toBe(-1);
+      expect(analyticsTab.tabIndex).toBe(-1);
 
       applicationsTab.click();
 
       expect(applicationsTab.tabIndex).toBe(0);
       expect(servicesTab.tabIndex).toBe(-1);
+      expect(analyticsTab.tabIndex).toBe(-1);
+
+      analyticsTab.click();
+
+      expect(analyticsTab.tabIndex).toBe(0);
+      expect(servicesTab.tabIndex).toBe(-1);
+      expect(applicationsTab.tabIndex).toBe(-1);
     });
 
     it('does not intercept Enter/Space, so native button activation keeps working alongside the mouse', async () => {
       const root = document.createElement('div');
       await renderPanel(root);
-      const applicationsTab = root.querySelector<HTMLButtonElement>('#admin-tab-applications')!;
+      const analyticsTab = root.querySelector<HTMLButtonElement>('#admin-tab-analytics')!;
 
       const enterEvent = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
-      applicationsTab.dispatchEvent(enterEvent);
+      analyticsTab.dispatchEvent(enterEvent);
       expect(enterEvent.defaultPrevented).toBe(false);
 
       const spaceEvent = new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true });
-      applicationsTab.dispatchEvent(spaceEvent);
+      analyticsTab.dispatchEvent(spaceEvent);
       expect(spaceEvent.defaultPrevented).toBe(false);
 
       // Click is what a real browser fires when Enter/Space activate a <button>.
-      applicationsTab.click();
-      expect(applicationsTab.getAttribute('aria-selected')).toBe('true');
-      expect(root.querySelector<HTMLElement>('#admin-panel-applications')!.hidden).toBe(false);
+      analyticsTab.click();
+      expect(analyticsTab.getAttribute('aria-selected')).toBe('true');
+      expect(root.querySelector<HTMLElement>('#admin-panel-analytics')!.hidden).toBe(false);
     });
   });
 });

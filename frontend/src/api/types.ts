@@ -134,6 +134,53 @@ export interface BehaviorMetricRead {
   updated_at: string;
 }
 
+// --- backend/app/schemas/analytics.py ---
+
+export type AnalyticsPeriod = 'day' | 'week' | 'month';
+
+export interface ButtonAnalyticsItem {
+  name: string;
+  count: number;
+  share_percent: number;
+}
+
+export interface SectionAnalyticsItem {
+  section: string;
+  total_duration_seconds: number;
+  average_duration_seconds: number;
+  interactions_count: number;
+  share_percent: number;
+}
+
+export interface AnalyticsOverview {
+  period: AnalyticsPeriod;
+  period_start: string;
+  period_end: string;
+  applications_count: number;
+  metrics_count: number;
+  applications_with_metrics: number;
+  applications_without_metrics: number;
+  average_time_on_page_seconds: number | null;
+  median_time_on_page_seconds: number | null;
+  average_return_count: number | null;
+  total_return_count: number;
+  total_button_clicks: number;
+  unique_clicked_buttons: number;
+  popular_buttons: ButtonAnalyticsItem[];
+  section_activity: SectionAnalyticsItem[];
+}
+
+export interface ApplicationBehaviorAnalytics {
+  application_id: number;
+  has_metrics: boolean;
+  time_on_page_seconds: number | null;
+  return_count: number | null;
+  clicked_buttons: ButtonAnalyticsItem[];
+  section_activity: SectionAnalyticsItem[];
+  total_button_clicks: number;
+  recorded_at: string | null;
+}
+
 // --- backend/app/schemas/auth.py ---
 
 export interface AdminRegisterPayload {

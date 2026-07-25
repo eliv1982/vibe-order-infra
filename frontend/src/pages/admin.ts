@@ -9,6 +9,8 @@ import type {
 } from '../api/types';
 import { escapeHtml } from '../utils/html';
 import { formatBudget } from '../utils/format';
+import { mountAdminAnalytics } from './adminAnalytics';
+import type { AnalyticsSectionController } from './adminAnalytics';
 import { mountAdminApplications } from './adminApplications';
 import type { ApplicationsSectionController } from './adminApplications';
 
@@ -22,6 +24,12 @@ interface AdminState {
  * it — see wireLogoutButton/wireTabs. */
 interface ApplicationsControllerRef {
   current: ApplicationsSectionController | null;
+}
+
+/** Same role as ApplicationsControllerRef, for the (lazily-created)
+ * "Статистика" controller. */
+interface AnalyticsControllerRef {
+  current: AnalyticsSectionController | null;
 }
 
 /**
@@ -511,6 +519,17 @@ function adminPanelTemplate(admin: AdminRead): string {
         >
           Заявки
         </button>
+        <button
+          type="button"
+          class="admin-tab"
+          id="admin-tab-analytics"
+          data-tab="analytics"
+          role="tab"
+          aria-selected="false"
+          aria-controls="admin-panel-analytics"
+        >
+          Статистика
+        </button>
       </nav>
 
       <section id="admin-panel-services" role="tabpanel" aria-labelledby="admin-tab-services">
@@ -518,6 +537,8 @@ function adminPanelTemplate(admin: AdminRead): string {
       </section>
 
       <section id="admin-panel-applications" role="tabpanel" aria-labelledby="admin-tab-applications" hidden></section>
+
+      <section id="admin-panel-analytics" role="tabpanel" aria-labelledby="admin-tab-analytics" hidden></section>
     </div>
   `;
 }
@@ -619,15 +640,27 @@ function renderAuthenticatedView(root: HTMLElement, renderId: number, admin: Adm
 
   const state: AdminState = { services: [], editingId: null };
   const applicationsControllerRef: ApplicationsControllerRef = { current: null };
+  const analyticsControllerRef: AnalyticsControllerRef = { current: null };
 
-  wireLogoutButton(root, renderId, applicationsControllerRef);
+  wireLogoutButton(root, renderId, applicationsControllerRef, analyticsControllerRef);
   wireCreateForm(root, renderId, state);
   wireListContainer(root, renderId, state);
   void loadServices(root, renderId, state);
-  wireTabs(root, renderId, applicationsControllerRef);
+  wireTabs(root, renderId, applicationsControllerRef, analyticsControllerRef);
 }
 
-type AdminTab = 'services' | 'applications';
+type AdminTab = 'services' | 'applications' | 'analytics';
+
+/** Shared by both sections' onSessionExpired callbacks and by logout — a
+ * session-ending transition tears down every lazily-mounted section
+ * controller, not just the one that happened to trigger it. */
+function disposeSectionControllers(
+  applicationsControllerRef: ApplicationsControllerRef,
+  analyticsControllerRef: AnalyticsControllerRef,
+): void {
+  applicationsControllerRef.current?.dispose();
+  analyticsControllerRef.current?.dispose();
+}
 
 /**
  * Wires the Услуги/Заявки tab switcher. Switching tabs never touches
@@ -649,18 +682,25 @@ type AdminTab = 'services' | 'applications';
 function wireTabs(
   root: HTMLElement,
   renderId: number,
-  controllerRef: ApplicationsControllerRef,
+  applicationsControllerRef: ApplicationsControllerRef,
+  analyticsControllerRef: AnalyticsControllerRef,
 ): void {
   const tabButtons = Array.from(root.querySelectorAll<HTMLButtonElement>('.admin-tab'));
   const servicesPanel = root.querySelector<HTMLElement>('#admin-panel-services');
   const applicationsPanel = root.querySelector<HTMLElement>('#admin-panel-applications');
-  if (!servicesPanel || !applicationsPanel) return;
+  const analyticsPanel = root.querySelector<HTMLElement>('#admin-panel-analytics');
+  if (!servicesPanel || !applicationsPanel || !analyticsPanel) return;
 
   let activeTab: AdminTab = 'services';
 
+  const onSessionExpired = (): void => {
+    disposeSectionControllers(applicationsControllerRef, analyticsControllerRef);
+    handleSessionExpired(root, renderId);
+  };
+
   // Arrow functions (not hoisted `function` declarations) so TypeScript
-  // keeps servicesPanel/applicationsPanel narrowed to HTMLElement inside
-  // them, per the null-check above.
+  // keeps servicesPanel/applicationsPanel/analyticsPanel narrowed to
+  // HTMLElement inside them, per the null-check above.
   const syncTabIndexes = (): void => {
     tabButtons.forEach((btn) => {
       btn.tabIndex = btn.dataset.tab === activeTab ? 0 : -1;
@@ -676,20 +716,30 @@ function wireTabs(
     syncTabIndexes();
     servicesPanel.hidden = tab !== 'services';
     applicationsPanel.hidden = tab !== 'applications';
+    analyticsPanel.hidden = tab !== 'analytics';
 
     if (tab === 'applications') {
-      if (!controllerRef.current) {
-        controllerRef.current = mountAdminApplications(applicationsPanel, {
+      if (!applicationsControllerRef.current) {
+        applicationsControllerRef.current = mountAdminApplications(applicationsPanel, {
           isActive: () => isCurrentRender(renderId),
-          onSessionExpired: () => {
-            controllerRef.current?.dispose();
-            handleSessionExpired(root, renderId);
-          },
+          onSessionExpired,
         });
       }
-      controllerRef.current.activate();
+      applicationsControllerRef.current.activate();
     } else {
-      controllerRef.current?.deactivate();
+      applicationsControllerRef.current?.deactivate();
+    }
+
+    if (tab === 'analytics') {
+      if (!analyticsControllerRef.current) {
+        analyticsControllerRef.current = mountAdminAnalytics(analyticsPanel, {
+          isActive: () => isCurrentRender(renderId),
+          onSessionExpired,
+        });
+      }
+      analyticsControllerRef.current.activate();
+    } else {
+      analyticsControllerRef.current?.deactivate();
     }
   };
 
@@ -735,11 +785,12 @@ function wireTabs(
 function wireLogoutButton(
   root: HTMLElement,
   renderId: number,
-  controllerRef: ApplicationsControllerRef,
+  applicationsControllerRef: ApplicationsControllerRef,
+  analyticsControllerRef: AnalyticsControllerRef,
 ): void {
   root.querySelector<HTMLButtonElement>('#logout-button')?.addEventListener('click', () => {
     if (!isCurrentRender(renderId)) return;
-    controllerRef.current?.dispose();
+    disposeSectionControllers(applicationsControllerRef, analyticsControllerRef);
     clearToken();
     // Logout ends this render generation outright — see handleSessionExpired
     // for why any other in-flight request from this session must be unable

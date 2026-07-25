@@ -19,9 +19,16 @@
  */
 
 import { api, isUnauthorizedError } from '../api/client';
-import type { ApplicationPriorityRead, ApplicationRead, PriorityLevel } from '../api/types';
+import type { ApplicationBehaviorAnalytics, ApplicationPriorityRead, ApplicationRead, PriorityLevel } from '../api/types';
 import { escapeHtml } from '../utils/html';
 import { formatBudget } from '../utils/format';
+import {
+  buttonAnalyticsListHtml,
+  formatAnalyticsDateTime,
+  formatCount,
+  formatSeconds,
+  sectionAnalyticsListHtml,
+} from './adminAnalytics';
 
 export interface ApplicationsSectionHost {
   /** Mirrors admin.ts's own render-generation guard — true while this
@@ -61,6 +68,14 @@ interface ApplicationsState {
    * admin touches the filter/search while no successful dataset exists. */
   hasLoadError: boolean;
   lastFocusedTrigger: HTMLButtonElement | null;
+  /** Bumped every time the modal opens for a (possibly different)
+   * application, and whenever it closes — the in-flight behavior-analytics
+   * detail request captures this value and only ever paints if it's still
+   * current when the response arrives (see loadApplicationAnalytics). */
+  modalGeneration: number;
+  /** Guards against a second overlapping detail request for the same modal
+   * generation (e.g. a rapid double-click on the "Повторить" retry button). */
+  modalAnalyticsLoading: boolean;
 }
 
 /**
@@ -353,7 +368,111 @@ function applicationModalBodyTemplate(item: ApplicationPriorityRead): string {
         item.requires_personal_manager ? 'Нужен' : 'Не требуется'
       }</p>
     </section>
+
+    <section class="modal-section">
+      <h3>Поведение на странице</h3>
+      <div id="application-modal-analytics-content" role="status" aria-live="polite">
+        <p class="admin-empty">Загружаем поведенческие метрики…</p>
+      </div>
+    </section>
   `;
+}
+
+// --- Behavior analytics detail (lazy-loaded after the modal opens) --------
+// Every number/label rendered here comes straight from
+// GET /api/analytics/applications/{id} — reuses the same formatting/list
+// helpers as the "Статистика" tab (see adminAnalytics.ts) so the two never
+// drift apart, and never repeats the period-level overview KPIs.
+
+function applicationAnalyticsDetailHtml(detail: ApplicationBehaviorAnalytics): string {
+  if (!detail.has_metrics) {
+    return '<p class="admin-empty">Для этой заявки поведенческие метрики не записаны.</p>';
+  }
+
+  const summaryHtml = `
+    <dl>
+      <div><dt>Время на странице</dt><dd>${escapeHtml(formatSeconds(detail.time_on_page_seconds))}</dd></div>
+      <div><dt>Возвратов к форме</dt><dd>${escapeHtml(formatCount(detail.return_count))}</dd></div>
+      <div><dt>Кликов по кнопкам</dt><dd>${escapeHtml(formatCount(detail.total_button_clicks))}</dd></div>
+      <div><dt>Метрика записана</dt><dd>${escapeHtml(formatAnalyticsDateTime(detail.recorded_at))}</dd></div>
+    </dl>
+  `;
+
+  const buttonsHtml = buttonAnalyticsListHtml(detail.clicked_buttons, 'Кнопки не нажимались.');
+  const sectionsHtml = sectionAnalyticsListHtml(
+    detail.section_activity,
+    'Активность по секциям не зафиксирована.',
+  );
+
+  return `
+    ${summaryHtml}
+    <h4>Нажатые кнопки</h4>
+    ${buttonsHtml}
+    <h4>Активность по секциям</h4>
+    ${sectionsHtml}
+  `;
+}
+
+function applicationAnalyticsErrorHtml(): string {
+  return `
+    <p class="admin-empty">Не удалось загрузить поведенческие метрики.</p>
+    <button type="button" class="btn btn-secondary btn-small" id="application-modal-analytics-retry">
+      Повторить
+    </button>
+  `;
+}
+
+/** Bumps the modal generation (invalidating any in-flight detail request)
+ * and resets the in-flight flag together, so the very next load this modal
+ * starts is never blocked by a stale request that will now be ignored when
+ * it resolves — mirrors adminAnalytics.ts's period-switch invalidation. */
+function bumpModalGeneration(state: ApplicationsState): number {
+  state.modalGeneration += 1;
+  state.modalAnalyticsLoading = false;
+  return state.modalGeneration;
+}
+
+async function loadApplicationAnalytics(
+  container: HTMLElement,
+  host: ApplicationsSectionHost,
+  state: ApplicationsState,
+  applicationId: number,
+  generation: number,
+): Promise<void> {
+  if (state.modalAnalyticsLoading) return;
+
+  function isStillCurrent(): boolean {
+    return generation === state.modalGeneration && host.isActive();
+  }
+
+  const contentEl = container.querySelector<HTMLElement>('#application-modal-analytics-content');
+  if (!contentEl) return;
+
+  state.modalAnalyticsLoading = true;
+  contentEl.innerHTML = '<p class="admin-empty">Загружаем поведенческие метрики…</p>';
+
+  try {
+    const detail = await api.getApplicationBehaviorAnalytics(applicationId);
+    if (!isStillCurrent()) return;
+    contentEl.innerHTML = applicationAnalyticsDetailHtml(detail);
+  } catch (error) {
+    if (!isStillCurrent()) return;
+    if (isUnauthorizedError(error)) {
+      host.onSessionExpired();
+      return;
+    }
+    contentEl.innerHTML = applicationAnalyticsErrorHtml();
+    contentEl
+      .querySelector<HTMLButtonElement>('#application-modal-analytics-retry')
+      ?.addEventListener('click', () => {
+        if (!isStillCurrent()) return;
+        void loadApplicationAnalytics(container, host, state, applicationId, generation);
+      });
+  } finally {
+    if (generation === state.modalGeneration) {
+      state.modalAnalyticsLoading = false;
+    }
+  }
 }
 
 function shellTemplate(): string {
@@ -507,6 +626,7 @@ async function loadApplications(
 function openModal(
   container: HTMLElement,
   state: ApplicationsState,
+  host: ApplicationsSectionHost,
   item: ApplicationPriorityRead,
   trigger: HTMLButtonElement,
 ): void {
@@ -515,10 +635,16 @@ function openModal(
   const closeButton = container.querySelector<HTMLButtonElement>('#application-modal-close');
   if (!overlay || !body || !closeButton) return;
 
+  // A fresh generation — invalidates whatever detail request the
+  // previously-open application (if any) may have had in flight.
+  const generation = bumpModalGeneration(state);
+
   body.innerHTML = applicationModalBodyTemplate(item);
   overlay.hidden = false;
   state.lastFocusedTrigger = trigger;
   closeButton.focus();
+
+  void loadApplicationAnalytics(container, host, state, item.application.id, generation);
 }
 
 /** restoreFocus is false when closing as a side effect of the tab becoming
@@ -533,6 +659,9 @@ function closeModal(
   const overlay = container.querySelector<HTMLElement>('#application-modal-overlay');
   if (!overlay || overlay.hidden) return;
   overlay.hidden = true;
+  // Invalidates any pending/in-flight behavior-analytics detail request for
+  // the application that was just closed.
+  bumpModalGeneration(state);
   const trigger = state.lastFocusedTrigger;
   state.lastFocusedTrigger = null;
   if (restoreFocus) trigger?.focus();
@@ -559,6 +688,7 @@ function wireModal(container: HTMLElement, state: ApplicationsState): void {
 function wireListDelegation(
   container: HTMLElement,
   state: ApplicationsState,
+  host: ApplicationsSectionHost,
   isInteractive: () => boolean,
 ): void {
   const listEl = container.querySelector<HTMLElement>('#applications-list');
@@ -579,13 +709,14 @@ function wireListDelegation(
     const item = state.visibleItems[index];
     if (!item) return;
 
-    openModal(container, state, item, button);
+    openModal(container, state, host, item, button);
   });
 }
 
 function wireControls(
   container: HTMLElement,
   state: ApplicationsState,
+  host: ApplicationsSectionHost,
   isInteractive: () => boolean,
   requestReload: () => void,
 ): void {
@@ -614,7 +745,7 @@ function wireControls(
     requestReload();
   });
 
-  wireListDelegation(container, state, isInteractive);
+  wireListDelegation(container, state, host, isInteractive);
   wireModal(container, state);
 }
 
@@ -652,6 +783,8 @@ export function mountAdminApplications(
     loading: false,
     hasLoadError: false,
     lastFocusedTrigger: null,
+    modalGeneration: 0,
+    modalAnalyticsLoading: false,
   };
 
   let tabActive = false;
@@ -666,7 +799,7 @@ export function mountAdminApplications(
   }
 
   container.innerHTML = shellTemplate();
-  wireControls(container, state, isInteractive, () => {
+  wireControls(container, state, host, isInteractive, () => {
     void loadApplications(container, host, state, currentActivationId, isStillCurrent);
   });
 
