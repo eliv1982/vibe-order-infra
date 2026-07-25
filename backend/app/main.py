@@ -7,7 +7,7 @@ from fastapi import APIRouter, FastAPI
 
 from app import models  # noqa: F401 - registers models on Base.metadata before create_all()
 from app.core.database import Base, engine
-from app.routes import admin_settings, applications, auth, behavior_metrics
+from app.routes import admin_settings, analytics, applications, auth, behavior_metrics
 
 
 @asynccontextmanager
@@ -32,5 +32,6 @@ api_router.include_router(applications.router)
 api_router.include_router(behavior_metrics.router)
 api_router.include_router(admin_settings.router)
 api_router.include_router(auth.router)
+api_router.include_router(analytics.router)
 
 app.include_router(api_router)

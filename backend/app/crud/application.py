@@ -1,5 +1,7 @@
 """Database access functions for the Application entity. No FastAPI/HTTP concerns here."""
 
+from datetime import datetime
+
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -41,6 +43,24 @@ def get_all_applications(db: Session) -> list[Application]:
     materialized scoring or a different pagination strategy.
     """
     stmt = select(Application).order_by(Application.id)
+    return list(db.scalars(stmt).all())
+
+
+def get_applications_created_between(
+    db: Session, start: datetime, end: datetime
+) -> list[Application]:
+    """Applications with created_at in the half-open [start, end) window.
+
+    Used by the analytics overview endpoint to pre-scope the period at the
+    DB level; app.services.behavior_analytics re-validates the exact
+    boundary itself (see its module docstring) so that logic stays
+    unit-testable independent of this query.
+    """
+    stmt = (
+        select(Application)
+        .where(Application.created_at >= start, Application.created_at < end)
+        .order_by(Application.id)
+    )
     return list(db.scalars(stmt).all())
 
 
