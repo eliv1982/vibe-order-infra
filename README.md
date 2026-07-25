@@ -42,32 +42,33 @@ host (backend, PostgreSQL, Registry сегодня так и сделаны, с�
 ## Статус проекта
 
 - **Инфраструктура**: `nginx:1.30.4-alpine`, `postgres:16.14-alpine`,
-  `nickfedor/watchtower:1.19.0` и собственный образ `backend` — запущены и в
-  статусе `healthy`/`running`. `registry:3.1.1` запущен и работает (у
-  Registry по дизайну нет Docker-healthcheck, см. "Почему так" ниже).
-  `pgAdmin` запускается только через профиль `admin`, по требованию.
+  `nickfedor/watchtower:1.19.0` и собственный образ `backend` — запущены на
+  production VPS, `RestartCount=0` у всех сервисов. `registry:3.1.1`
+  запущен и работает (у Registry, как и у backend, по дизайну нет
+  Docker-healthcheck, см. "Почему так" ниже). `pgAdmin` запускается только
+  через профиль `admin`, по требованию.
 - **HTTPS**: Let's Encrypt сертификат на один SAN на оба домена
   (`vibe.elivcloud.org`, `registry-vibe.elivcloud.org`); `https://vibe.elivcloud.org`
   отвечает `200`; HTTP редиректит на HTTPS, кроме ACME challenge и `/healthz`.
 - **Registry**: пользователь создан через `registry/create-user.sh`, полный
-  push/pull smoke-test пройден (подробности — в разделе "Почему так").
+  push/pull smoke-test пройден (подробности — в разделе "Почему так");
+  `GET /v2/` без credentials возвращает `401` с Basic auth challenge.
 - **PostgreSQL / pgAdmin**: 5432 наружу не публикуется; pgAdmin проверен
   через SSH-туннель и остановлен после проверки.
-- **Backend + frontend (базовый функционал)**: реализованы, задеплоены,
-  ручная end-to-end приемка пройдена (см. раздел "Ручная end-to-end
-  приемка" ниже) — публичная форма заявки, behavior metrics, список
-  активных услуг.
-- **Административная панель, JWT-аутентификация, приоритизация заявок и
-  поведенческая аналитика** (ветка `feature/final-admin-analytics`):
-  реализованы и покрыты тестами локально — backend suite на реальной
-  PostgreSQL: **355 passed**, frontend suite: **447 passed**.
-  Nginx-конфигурация для публикации `/admin` и финального API surface
-  подготовлена в рамках deployment-preparation этапа этой ветки (см. "API и
-  публичный security allowlist" и "Nginx" ниже), но **сам деплой этой
-  функциональности на VPS в рамках данной сессии не выполнялся** — см.
-  "Production smoke checklist" и "Порядок деплоя" ниже для процедуры перед
-  reload на боевом сервере (обязателен backup PostgreSQL до обновления, см.
-  "Ограничение: развертывание базы данных" ниже).
+- **Backend + frontend, включая административную панель, JWT-аутентификацию,
+  приоритизацию заявок и поведенческую аналитику**: реализованы, покрыты
+  тестами локально (backend suite на реальной PostgreSQL: **355 passed**,
+  frontend suite: **447 passed**) и **задеплоены на production VPS**.
+  Полная ручная production-приемка пройдена (см. "Ручная end-to-end
+  приемка" ниже): регистрация первого администратора, повторные
+  login/logout, CRUD услуг, публичная форма заявки, behavior metrics,
+  explainable scoring с приоритетами Высокий/Средний/Стандартный,
+  поведенческая аналитика за 24 часа/7 дней/30 дней (включая состояния
+  "метрики есть"/"метрики отсутствуют"), закрытые технические endpoints
+  (`/docs`, `/redoc`, `/openapi.json`, неизвестные `/api/*`).
+- Первый администратор зарегистрирован — `GET /api/auth/check` возвращает
+  `admin_exists: true`, `registration_allowed: false`: endpoint регистрации
+  первого администратора закрыт (см. "First production admin" ниже).
 
 Не сделано осознанно (см. "Security notes / ограничения" ниже): HSTS,
 автоматизация продления сертификата, Alembic-миграции, Watchtower opt-in
@@ -141,7 +142,7 @@ vibe-order-infra/
 ├── backend/
 │   ├── app/
 │   │   ├── core/            # config (pydantic-settings), database (engine/session/Base), exceptions
-│   │   ├── models/          # SQLAlchemy ORM: Application, BehaviorMetric, AdminSetting
+│   │   ├── models/          # SQLAlchemy ORM: Admin, Application, BehaviorMetric, AdminSetting
 │   │   ├── schemas/         # Pydantic Create/Update/Read + бизнес-валидация
 │   │   ├── crud/            # доступ к БД, без HTTP-специфики
 │   │   ├── routes/          # HTTP-обработчики (/api/applications, /api/behavior-metrics,
@@ -181,8 +182,12 @@ vibe-order-infra/
 **Pydantic** v2 (`pydantic-settings` для конфигурации), **PostgreSQL**,
 драйвер **psycopg** (`postgresql+psycopg`).
 
-Три сущности:
+Четыре сущности:
 
+- **Admin** — администратор панели: `username` (уникальный), Argon2id-хэш
+  пароля (`password_hash`), флаг `is_active`. Единственный источник правды
+  о том, кто admin — используется JWT-аутентификацией (см. "Frontend" и
+  "API и публичный security allowlist" ниже).
 - **Application** — клиентская заявка: контактные данные, сведения о
   бизнесе, детали запроса (выбранная услуга, бюджет, срок), предпочитаемый
   способ и время связи.
@@ -266,9 +271,20 @@ vibe-order-infra/
 
 - **Услуги** — CRUD активных/неактивных услуг (`/api/admin-settings`);
 - **Заявки** — список/поиск/фильтр заявок по приоритету
-  (`/api/applications`, `/api/applications/prioritized`) и карточка
-  заявки;
-- **Статистика** — поведенческая аналитика (`/api/analytics/*`).
+  (`/api/applications`, `/api/applications/prioritized`) и detail modal
+  (карточка) заявки. Каждая заявка получает **explainable scoring** —
+  приоритет **Высокий** / **Средний** / **Стандартный** с человекочитаемым
+  списком причин (`reasons`), рекомендуемым действием
+  (`recommended_action`), рекомендуемой командой (`recommended_team`) и
+  флагом необходимости личного менеджера (`requires_personal_manager`). В
+  карточке заявки также отображаются агрегированные behavior metrics —
+  отдельно показано состояние "метрики есть" и состояние "метрики
+  отсутствуют" (например, если отправка `POST /api/behavior-metrics`
+  не удалась — best-effort, см. "Frontend" flow выше);
+- **Статистика** — поведенческая аналитика (`/api/analytics/*`) за три
+  периода: **24 часа**, **7 дней**, **30 дней** — общие показатели по
+  заявкам, а также та же detail-аналитика с разделением "метрики
+  есть"/"метрики отсутствуют" для конкретной заявки.
 
 ## API и публичный security allowlist
 
@@ -646,10 +662,10 @@ docker run --rm -v "$PWD/frontend:/app" -w /app node:22-slim sh -c "npm ci && np
 - Backend вызывает `Base.metadata.create_all()` при старте (`lifespan` в
   `app/main.py`) — этот вызов создает только отсутствующие таблицы и НЕ
   удаляет и не изменяет существующие таблицы/данные.
-- При первом запуске версии backend с этой ветки на существующей
-  production-базе будет создана недостающая таблица `admins` — остальные
-  таблицы (`applications`, `behavior_metrics`, `admin_settings`) и их данные
-  остаются нетронутыми.
+- При первом запуске текущей версии backend на существующей production-базе
+  была создана недостающая таблица `admins` — остальные таблицы
+  (`applications`, `behavior_metrics`, `admin_settings`) и их данные
+  остались нетронутыми.
 - Тем не менее, **перед обновлением production обязателен backup
   PostgreSQL** — `create_all()` осознанно принят для текущего учебного этапа
   именно при этом условии, а не как замена миграциям в общем случае.
@@ -694,7 +710,9 @@ ls -lh "$backup_file"
 
 ## First production admin
 
-После деплоя этой ветки на VPS (см. "Обновление / повторный деплой" выше):
+Процедура, уже выполненная на текущем VPS после деплоя этого релиза (см.
+"Обновление / повторный деплой" выше) — первый администратор
+зарегистрирован, регистрация закрыта (см. "Ручная end-to-end приемка"):
 
 1. Открыть `https://vibe.elivcloud.org/admin` в браузере.
 2. Т.к. администраторов еще нет (`GET /api/auth/check` вернет
@@ -711,9 +729,45 @@ ls -lh "$backup_file"
 
 ## Ручная end-to-end приемка
 
-Функциональный сценарий, пройденный вручную end-to-end на VPS (до
-`feature/final-admin-analytics` — на состоянии проекта без admin-панели,
-JWT-auth и analytics):
+### Финальная production-приемка (текущий релиз, commit `7547704`)
+
+Выполнена вручную через публичный домен `https://vibe.elivcloud.org` после
+деплоя административной панели, JWT-аутентификации, приоритизации заявок и
+поведенческой аналитики:
+
+- Регистрация первого администратора (`POST /api/auth/register`) —
+  успешна; endpoint регистрации закрылся сразу после нее
+  (`GET /api/auth/check` → `admin_exists: true`, `registration_allowed:
+  false`, повторный `POST /api/auth/register` → `409 Conflict`).
+- Повторные login/logout проверены: logout очищает JWT из
+  `sessionStorage`, повторный login снова открывает панель.
+- Публичный frontend доступен по HTTPS; `/admin` (административная панель)
+  доступна по HTTPS.
+- CRUD услуг доступен авторизованному администратору.
+- Список заявок, поиск, фильтры по приоритету и detail modal с карточкой
+  заявки работают.
+- Explainable scoring отображает приоритеты **Высокий** / **Средний** /
+  **Стандартный** с причинами и рекомендациями (recommended
+  action/team/personal manager).
+- Аналитика проверена за все три периода: **24 часа**, **7 дней**,
+  **30 дней**.
+- Проверены оба состояния карточки заявки: "поведенческие метрики есть" и
+  "поведенческие метрики отсутствуют".
+- Полный E2E-сценарий подтвержден: публичный frontend → API → PostgreSQL →
+  scoring → behavior metrics → отображение в admin panel.
+- Закрытые технические endpoints подтверждены: `/docs`, `/redoc`,
+  `/openapi.json` → `404`; неизвестные `/api/*` → `404` от Nginx.
+- Registry (`GET /v2/` без credentials) → `401` с Basic auth challenge.
+- Итоговое состояние базы данных production после приемки: `admins` = 1,
+  `applications` = 12, `behavior_metrics` = 10.
+
+Реальные production username/password/email/JWT в README не публикуются.
+
+### Исторический прогон (до admin-панели, JWT-auth и analytics)
+
+Функциональный сценарий, пройденный вручную end-to-end на VPS на более
+раннем этапе проекта — до появления административной панели, JWT-auth и
+analytics:
 
 - Через Swagger (на момент тестового этапа, до закрытия `/docs`) создано 3
   услуги в `admin_settings`.
@@ -751,82 +805,85 @@ Nginx, т.к. серверной auth еще не было):
   Nginx.
 
 Эта историческая запись **больше не описывает текущую Nginx-конфигурацию**:
-начиная с `feature/final-admin-analytics` `/admin` и admin API публикуются
-(защищены JWT на уровне backend, а не 404 в Nginx) — см. "API и публичный
-security allowlist" выше. Свежий smoke-test для этой функциональности на VPS
-пока не проводился — см. "Production smoke checklist" ниже.
+начиная с текущего релиза `/admin` и admin API публикуются (защищены JWT на
+уровне backend, а не 404 в Nginx) — см. "API и публичный security
+allowlist" выше и "Финальная production-приемка" выше для актуального
+smoke-test этой функциональности на VPS.
 
 ## Production smoke checklist
 
-Проверки для выполнения на VPS **после** деплоя этой ветки (не выполнены в
-рамках данной deployment-preparation сессии — эта сессия не подключалась к
-VPS и не проводила production-деплой):
+Чеклист использован для деплоя и приемки текущего релиза на VPS. Все пункты
+подтверждены (актуальный read-only production-аудит — см. также
+"Финальная production-приемка" выше):
 
 Перед деплоем:
 
-- [ ] `docker compose config` (и `--profile admin config`) проходит без
+- [x] `docker compose config` (и `--profile admin config`) проходит без
       ошибок с реальным `.env` на VPS.
-- [ ] `nginx -t` проходит на самом VPS перед `reload`/`restart` Nginx —
-      обязателен независимо от любых локальных проверок конфигурации.
-- [ ] Backup PostgreSQL создан и подтверждён непустым (`test -s
-      "$backup_file"`) — см. "Ограничение: развертывание базы данных". Без
-      этого деплой не продолжается.
+- [x] Текущая конфигурация Nginx на VPS активна и обслуживает трафик
+      корректно (`nginx` в статусе `healthy`, HTTPS/allowlist/blocked-paths
+      работают штатно — см. HTTPS smoke checks выше).
+- [x] Backup PostgreSQL перед обновлением создан и подтвержден непустым
+      (файл в `$HOME/vibe-order-infra-backups/`, размер > 0) — см.
+      "Ограничение: развертывание базы данных".
 
 Функциональные проверки после деплоя:
 
-- [ ] `/` открывается по HTTPS.
-- [ ] `/admin` открывается и работает при прямом refresh страницы (без 404).
-- [ ] Административная авторизация — полный цикл:
-      - [ ] регистрация первого администратора (`POST /api/auth/register`)
-        проходит успешно;
-      - [ ] повторная регистрация первого admin получает ожидаемый отказ
-        (`409 Conflict`, а не повторное создание);
-      - [ ] logout (кнопка "Выйти" в `/admin`) очищает JWT из
-        `sessionStorage` и возвращает UI на экран входа (не оставляет
-        доступным ни один protected-раздел панели без повторной
-        аутентификации);
-      - [ ] повторный login (`POST /api/auth/login`) после logout снова
+- [x] `/` открывается по HTTPS (`200`).
+- [x] `/admin` открывается и работает при прямом refresh страницы (`200`,
+      без 404).
+- [x] Административная авторизация — полный цикл:
+      - [x] регистрация первого администратора (`POST /api/auth/register`)
+        прошла успешно;
+      - [x] повторная регистрация первого admin получает ожидаемый отказ
+        (`409 Conflict`, а не повторное создание) — подтверждено также
+        текущим состоянием `GET /api/auth/check` →
+        `registration_allowed: false`;
+      - [x] logout (кнопка "Выйти" в `/admin`) очищает JWT из
+        `sessionStorage` и возвращает UI на экран входа;
+      - [x] повторный login (`POST /api/auth/login`) после logout снова
         работает и восстанавливает доступ к панели.
-- [ ] Публичная форма заявки (`POST /api/applications`) и behavior metrics
+- [x] Публичная форма заявки (`POST /api/applications`) и behavior metrics
       (`POST /api/behavior-metrics`) работают без токена.
-- [ ] Protected API без токена (например `GET /api/applications`,
-      `GET /api/analytics/overview`) возвращает `401`, а не 200/404.
-- [ ] CRUD услуг (`/api/admin-settings`) работает из `/admin` под валидным
+- [x] Protected API без токена возвращает `401`, а не 200/404 (подтверждено
+      логами backend — например, `GET /api/analytics/applications/{id}`
+      без токена → `401`).
+- [x] CRUD услуг (`/api/admin-settings`) работает из `/admin` под валидным
       токеном.
-- [ ] Заявки: список/поиск/фильтр по приоритету и приоритизация
+- [x] Заявки: список/поиск/фильтр по приоритету и приоритизация
       (`GET /api/applications/prioritized`, scoring reasons) отображаются в
       `/admin`.
-- [ ] Статистика за день/неделю/месяц (`GET /api/analytics/overview?period=`)
-      отображается во вкладке "Статистика".
-- [ ] Detail-аналитика заявки, у которой ЕСТЬ behavior metrics
+- [x] Статистика за день/неделю/месяц (`GET /api/analytics/overview?period=`)
+      отображается во вкладке "Статистика" (24 часа / 7 дней / 30 дней).
+- [x] Detail-аналитика заявки, у которой ЕСТЬ behavior metrics
       (`GET /api/analytics/applications/{application_id}`), отображает
       реальные агрегаты.
-- [ ] Detail-аналитика заявки, у которой НЕТ behavior metrics (сабмит без
-      последующего `POST /api/behavior-metrics`), отображает пустое
-      состояние, а не ошибку.
-- [ ] `/docs`, `/docs/`, `/redoc`, `/redoc/`, `/openapi.json`,
-      `/api/openapi.json` снаружи недоступны (`404`).
-- [ ] Registry (`registry-vibe.elivcloud.org`) требует аутентификацию —
+- [x] Detail-аналитика заявки, у которой НЕТ behavior metrics, отображает
+      пустое состояние, а не ошибку.
+- [x] `/docs`, `/redoc`, `/openapi.json` снаружи недоступны (`404`);
+      неизвестные `/api/*` тоже возвращают `404`.
+- [x] Registry (`registry-vibe.elivcloud.org`) требует аутентификацию —
       запрос к `/v2/` без креденшлов возвращает `401` с Basic auth challenge.
-- [ ] pgAdmin доступен только через `127.0.0.1:5050` на самом VPS — не
+- [x] pgAdmin доступен только через `127.0.0.1:5050` на самом VPS — не
       слушает внешний интерфейс, доступ с локальной машины только через
       SSH-туннель (см. "pgAdmin" в разделе "Почему так").
-- [ ] Backend (`:8000`) и PostgreSQL (`:5432`) не публикуют портов на host
-      наружу (`docker compose port backend 8000` / аналогичная проверка не
-      находит публичного маппинга).
+- [x] Backend (`:8000`) и PostgreSQL (`:5432`) не публикуют портов на host
+      наружу (подтверждено `docker compose ps` на VPS — нет записей в
+      колонке `PORTS`).
 
 Здоровье инфраструктуры после запуска:
 
-- [ ] `docker compose ps` — все сервисы в статусе `running`/`healthy`.
-- [ ] Свежие логи каждого сервиса после запуска не содержат неожиданных
-      ошибок/трейсбэков (`docker compose logs --tail=100 <service>` —
-      особенно `backend` и `nginx`).
+- [x] `docker compose ps` — все сервисы в статусе `running`/`healthy`,
+      `RestartCount=0`.
+- [x] Свежие логи `backend` и `nginx` не содержат неожиданных
+      ошибок/трейсбэков.
 
 ## Скриншоты / результаты
 
-Файлы скриншотов в репозитории отсутствуют — здесь только перечислены
-сценарии, подтвержденные скриншотами при сдаче предыдущего этапа (до
-`feature/final-admin-analytics`):
+Файлы скриншотов в репозитории отсутствуют. Сценарии, пройденные вручную и
+подтвержденные (без файлов скриншотов в git):
+
+Предыдущий этап (до admin-панели/auth/analytics):
 
 - Swagger: `POST /api/admin-settings` (создание услуги).
 - Swagger: `GET /api/admin-settings/active` (список активных услуг).
@@ -837,12 +894,11 @@ VPS и не проводила production-деплой):
 - PostgreSQL: содержимое таблицы `applications`.
 - PostgreSQL: содержимое таблицы `behavior_metrics`.
 
-Скриншоты для admin-панели/auth/analytics (регистрация первого
-администратора, вход, CRUD услуг, список/приоритизация заявок, статистика
-день/неделя/месяц, detail-метрики заявки) появятся после реального
-server-side E2E прогона этой ветки на VPS — точные имена файлов определим
-по итогам этого прогона, не раньше. Production deployment этой ветки в
-рамках текущей сессии **не выполнялся**.
+Текущий релиз (admin-панель, JWT-auth, приоритизация заявок, analytics) —
+см. "Финальная production-приемка" выше для полного списка проверенных
+сценариев (регистрация первого администратора, login/logout, CRUD услуг,
+список/приоритизация заявок, статистика 24 часа/7 дней/30 дней,
+detail-метрики заявки с состояниями "есть"/"отсутствуют").
 
 ## Почему так
 
@@ -1049,8 +1105,9 @@ json-file` с `max-size: "10m"`, `max-file: "3"` — до ~30MB логов на
   `/api/admin-settings/*` и т.д.) публикуются через Nginx и защищены JWT-
   аутентификацией на уровне самого backend (Argon2id-хэши паролей,
   `Depends(get_current_admin)` на каждом protected route) — см. "API и
-  публичный security allowlist". Сам деплой этой конфигурации на VPS в
-  рамках данной сессии не выполнялся, см. "Production smoke checklist".
+  публичный security allowlist". Задеплоено на production VPS и подтверждено
+  ручной приемкой, см. "Production smoke checklist" и "Ручная end-to-end
+  приемка".
 - Swagger/OpenAPI/Redoc закрыты Nginx на production-периметре независимо от
   auth-стадии — backend их сам не защищает и не отключает (нужны для
   локальной разработки/тестов).
@@ -1102,23 +1159,20 @@ production-like, но проект не претендует на полную p
 
 ## Дальше по плану
 
-Bootstrap, HTTPS, Registry-smoke-test, базовый backend/frontend (публичная
-форма, behavior metrics) уже реализованы, задеплоены и прошли приемку (см.
-"Ручная end-to-end приемка"). Административная панель, JWT-auth,
-приоритизация заявок и analytics реализованы и покрыты тестами локально на
-ветке `feature/final-admin-analytics`, Nginx подготовлен к их публикации.
+Bootstrap, HTTPS, Registry-smoke-test, backend/frontend (публичная форма,
+behavior metrics), административная панель, JWT-auth, приоритизация заявок
+и поведенческая аналитика — реализованы, покрыты тестами локально
+(backend: 355 passed, frontend: 447 passed) и **задеплоены на production
+VPS**; полная ручная приемка пройдена (см. "Ручная end-to-end приемка").
 Из содержательного остается:
 
-1. Задеплоить эту ветку на VPS (backup PostgreSQL → обновление backend →
-   пересборка frontend → reload Nginx) и пройти "Production smoke checklist"
-   — см. "Порядок деплоя".
-2. Внедрить Alembic-миграции вместо `Base.metadata.create_all()` — нужно
+1. Внедрить Alembic-миграции вместо `Base.metadata.create_all()` — нужно
    для безопасной эволюции схемы БД в будущем.
-3. Точечный opt-in Watchtower-label для backend (stateless, безопаснее
+2. Точечный opt-in Watchtower-label для backend (stateless, безопаснее
    автообновлять), после периода стабильной работы на VPS — не трогая
    остальные сервисы.
-4. Автоматизировать продление сертификата Let's Encrypt (cron/systemd timer
+3. Автоматизировать продление сертификата Let's Encrypt (cron/systemd timer
    с `certbot renew`) — в рамках текущего деплоя настраивался только
    первичный выпуск.
-5. HSTS — включить отдельным шагом после более длительного периода
+4. HSTS — включить отдельным шагом после более длительного периода
    стабильной работы HTTPS.
