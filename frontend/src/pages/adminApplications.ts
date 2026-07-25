@@ -142,9 +142,44 @@ export function filterApplications(
 const KNOWN_PRIORITY_LEVELS: readonly PriorityLevel[] = ['hot', 'medium', 'low'];
 const FALLBACK_PRIORITY_LABEL = 'Не определена';
 
+/**
+ * Frontend-owned priority terminology (product decision: scoring reflects a
+ * composite processing priority, not sales-lead "temperature" or urgency
+ * alone) — the UI never shows "Горячая/Средняя/Низкая". Backend's own
+ * priority_label (still present on the wire, see api/types.ts) is
+ * intentionally not read anywhere in this module; the visible label and
+ * its accessible full form are both derived solely from the validated
+ * priority_level enum via these allowlist maps, so this display never
+ * depends on — or has to change alongside — the backend's Russian string.
+ */
+const PRIORITY_LEVEL_LABELS: Record<PriorityLevel, string> = {
+  hot: 'Высокий',
+  medium: 'Средний',
+  low: 'Стандартный',
+};
+
+const PRIORITY_LEVEL_FULL_LABELS: Record<PriorityLevel, string> = {
+  hot: 'Высокий приоритет обработки',
+  medium: 'Средний приоритет обработки',
+  low: 'Стандартный приоритет обработки',
+};
+
 /** Pure — unit tested. */
 export function isKnownPriorityLevel(value: unknown): value is PriorityLevel {
   return typeof value === 'string' && (KNOWN_PRIORITY_LEVELS as readonly string[]).includes(value);
+}
+
+/** Pure — unit tested. Short badge/filter text for a validated priority
+ * level; unknown/malformed input falls back to the same neutral label the
+ * badge itself uses. */
+export function priorityLevelLabel(value: unknown): string {
+  return isKnownPriorityLevel(value) ? PRIORITY_LEVEL_LABELS[value] : FALLBACK_PRIORITY_LABEL;
+}
+
+/** Pure — unit tested. Full "N приоритет обработки" form for accessible
+ * text (aria-label) and contexts with room for the whole phrase. */
+export function priorityLevelFullLabel(value: unknown): string {
+  return isKnownPriorityLevel(value) ? PRIORITY_LEVEL_FULL_LABELS[value] : FALLBACK_PRIORITY_LABEL;
 }
 
 /** Pure — unit tested. Clamps a runtime score into [0, 100]; anything that
@@ -173,10 +208,6 @@ export function reasonPointsDisplay(value: unknown): string {
   return normalized >= 0 ? `+${normalized}` : `${normalized}`;
 }
 
-function safeLabel(value: unknown): string {
-  return typeof value === 'string' && value.length > 0 ? value : FALLBACK_PRIORITY_LABEL;
-}
-
 /** Pure — unit tested. Defensive local wrapper around utils/format's
  * formatBudget: `application.budget` arrives as a Decimal-as-string, but at
  * runtime it can't be trusted to actually be one. Rejects everything that
@@ -193,9 +224,12 @@ export function formatApplicationBudget(value: unknown): string {
 
 // --- Templates --------------------------------------------------------
 // Every applicant-supplied string is escaped, and so is every backend
-// label/recommendation string (priority_label, recommended_action,
-// recommended_team, reason.label) — none of it is trusted markup.
-// reason.code is intentionally never rendered (internal-only).
+// label/recommendation string (recommended_action, recommended_team,
+// reason.label) — none of it is trusted markup. reason.code is
+// intentionally never rendered (internal-only). Backend's priority_label
+// is never rendered either — the badge's text/accessible name come from
+// the frontend-owned PRIORITY_LEVEL_LABELS/PRIORITY_LEVEL_FULL_LABELS maps
+// above, keyed off the validated priority_level enum.
 //
 // priority_score/reason.points/priority_level are run through the
 // normalizers above before display, and application.id is never
@@ -206,8 +240,11 @@ export function formatApplicationBudget(value: unknown): string {
 function priorityBadgeHtml(item: ApplicationPriorityRead): string {
   const known = isKnownPriorityLevel(item.priority_level);
   const levelClass = known ? item.priority_level : 'unknown';
-  const label = known ? safeLabel(item.priority_label) : FALLBACK_PRIORITY_LABEL;
-  return `<span class="priority-badge priority-badge--${levelClass}">${escapeHtml(label)}</span>`;
+  const label = priorityLevelLabel(item.priority_level);
+  const fullLabel = priorityLevelFullLabel(item.priority_level);
+  return `<span class="priority-badge priority-badge--${levelClass}" aria-label="${escapeHtml(
+    fullLabel,
+  )}">${escapeHtml(label)}</span>`;
 }
 
 function applicationCardTemplate(item: ApplicationPriorityRead, index: number): string {
@@ -307,7 +344,7 @@ function applicationModalBodyTemplate(item: ApplicationPriorityRead): string {
     </section>
 
     <section class="modal-section">
-      <h3>Приоритет</h3>
+      <h3>Приоритет обработки</h3>
       <p class="application-card-score">${priorityScoreDisplay(item.priority_score)} — ${priorityBadgeHtml(item)}</p>
       ${reasonsListHtml(item)}
       <p><strong>Рекомендуемое действие:</strong> ${escapeHtml(item.recommended_action)}</p>
@@ -322,11 +359,11 @@ function applicationModalBodyTemplate(item: ApplicationPriorityRead): string {
 function shellTemplate(): string {
   return `
     <div class="applications-toolbar">
-      <div class="applications-filters" role="group" aria-label="Фильтр заявок по приоритету">
+      <div class="applications-filters" role="group" aria-label="Фильтр заявок по приоритету обработки">
         <button type="button" class="filter-chip" data-filter="all" aria-pressed="true">Все</button>
-        <button type="button" class="filter-chip" data-filter="hot" aria-pressed="false">Горячие</button>
-        <button type="button" class="filter-chip" data-filter="medium" aria-pressed="false">Средние</button>
-        <button type="button" class="filter-chip" data-filter="low" aria-pressed="false">Низкие</button>
+        <button type="button" class="filter-chip" data-filter="hot" aria-pressed="false">Высокий</button>
+        <button type="button" class="filter-chip" data-filter="medium" aria-pressed="false">Средний</button>
+        <button type="button" class="filter-chip" data-filter="low" aria-pressed="false">Стандартный</button>
       </div>
       <div class="applications-search-row">
         <label class="sr-only" for="applications-search">Поиск по заявкам</label>
