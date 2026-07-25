@@ -1,5 +1,7 @@
 """Database access functions for the BehaviorMetric entity. No FastAPI/HTTP concerns here."""
 
+from datetime import datetime
+
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -40,6 +42,40 @@ def get_behavior_metric_by_application(
 
 def get_behavior_metrics(db: Session, skip: int = 0, limit: int = 100) -> list[BehaviorMetric]:
     stmt = select(BehaviorMetric).order_by(BehaviorMetric.id).offset(skip).limit(limit)
+    return list(db.scalars(stmt).all())
+
+
+def get_behavior_metrics_by_application(db: Session, application_id: int) -> list[BehaviorMetric]:
+    """All metric rows linked to one application.
+
+    application_id is UNIQUE (see app/models/behavior_metric.py), so this
+    currently returns at most one row; it stays list-shaped so the
+    analytics detail endpoint's aggregation is well-defined even if that
+    constraint is ever relaxed (see build_application_detail).
+    """
+    stmt = (
+        select(BehaviorMetric)
+        .where(BehaviorMetric.application_id == application_id)
+        .order_by(BehaviorMetric.id)
+    )
+    return list(db.scalars(stmt).all())
+
+
+def get_behavior_metrics_created_between(
+    db: Session, start: datetime, end: datetime
+) -> list[BehaviorMetric]:
+    """Metrics with created_at in the half-open [start, end) window.
+
+    Used by the analytics overview endpoint to pre-scope the period at the
+    DB level; app.services.behavior_analytics re-validates the exact
+    boundary itself so that logic stays unit-testable independent of this
+    query.
+    """
+    stmt = (
+        select(BehaviorMetric)
+        .where(BehaviorMetric.created_at >= start, BehaviorMetric.created_at < end)
+        .order_by(BehaviorMetric.id)
+    )
     return list(db.scalars(stmt).all())
 
 

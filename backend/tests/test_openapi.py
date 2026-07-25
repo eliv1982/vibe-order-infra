@@ -64,3 +64,15 @@ def test_behavior_metrics_list_endpoint_requires_bearer():
     schema = TestClient(app).get("/openapi.json").json()
     operation = schema["paths"]["/api/behavior-metrics"]["get"]
     assert operation.get("security") == [{"HTTPBearer": []}]
+
+
+def test_analytics_overview_endpoint_requires_bearer():
+    schema = TestClient(app).get("/openapi.json").json()
+    operation = schema["paths"]["/api/analytics/overview"]["get"]
+    assert operation.get("security") == [{"HTTPBearer": []}]
+
+
+def test_analytics_application_detail_endpoint_requires_bearer():
+    schema = TestClient(app).get("/openapi.json").json()
+    operation = schema["paths"]["/api/analytics/applications/{application_id}"]["get"]
+    assert operation.get("security") == [{"HTTPBearer": []}]

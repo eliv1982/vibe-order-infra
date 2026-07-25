@@ -43,6 +43,8 @@ PROTECTED_ENDPOINTS = [
     ("GET", "/api/behavior-metrics/999999", None),
     ("PATCH", "/api/behavior-metrics/999999", {}),
     ("DELETE", "/api/behavior-metrics/999999", None),
+    ("GET", "/api/analytics/overview", None),
+    ("GET", "/api/analytics/applications/999999", None),
 ]
 _ENDPOINT_IDS = [f"{method} {path}" for method, path, _ in PROTECTED_ENDPOINTS]
 
