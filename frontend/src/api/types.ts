@@ -85,6 +85,34 @@ export interface ApplicationRead {
   updated_at: string;
 }
 
+// --- backend/app/schemas/application_analysis.py ---
+
+export interface ScoringReason {
+  code: string;
+  points: number;
+  label: string;
+}
+
+export type PriorityLevel = 'hot' | 'medium' | 'low';
+
+export interface ApplicationPriorityRead {
+  application: ApplicationRead;
+  priority_score: number;
+  priority_level: PriorityLevel;
+  priority_label: string;
+  reasons: ScoringReason[];
+  recommended_action: string;
+  recommended_team: string;
+  requires_personal_manager: boolean;
+}
+
+export interface PrioritizedApplicationList {
+  items: ApplicationPriorityRead[];
+  total: number;
+  skip: number;
+  limit: number;
+}
+
 // --- backend/app/schemas/behavior_metric.py ---
 
 export interface BehaviorMetricCreatePayload {

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, extractErrorDetail, isUnauthorizedError, ApiError } from './client';
-import type { ApplicationCreatePayload } from './types';
+import type { ApplicationCreatePayload, PrioritizedApplicationList } from './types';
 
 vi.mock('./tokenStorage', () => ({
   getToken: vi.fn(),
@@ -85,6 +85,29 @@ describe('api request URLs (canonical paths — no trailing slash)', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/applications', expect.anything());
   });
 
+  it('GET /api/applications/prioritized?skip=0&limit=100 by default', async () => {
+    await api.getPrioritizedApplications();
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/applications/prioritized?skip=0&limit=100',
+      expect.anything(),
+    );
+  });
+
+  it('GET /api/applications/prioritized with custom skip/limit, safely encoded', async () => {
+    await api.getPrioritizedApplications(20, 50);
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/applications/prioritized?skip=20&limit=50',
+      expect.anything(),
+    );
+  });
+
+  it('parses the PrioritizedApplicationList response', async () => {
+    const payload: PrioritizedApplicationList = { items: [], total: 0, skip: 0, limit: 100 };
+    fetchMock.mockResolvedValueOnce({ ok: true, status: 200, json: async () => payload });
+
+    await expect(api.getPrioritizedApplications()).resolves.toEqual(payload);
+  });
+
   it('POST /api/behavior-metrics', async () => {
     await api.createBehaviorMetric({ application_id: 1 });
     expect(fetchMock).toHaveBeenCalledWith('/api/behavior-metrics', expect.anything());
@@ -148,6 +171,11 @@ describe('Authorization header — attached only to protected calls', () => {
 
   it('getCurrentAdmin sends Authorization: Bearer <token>', async () => {
     await api.getCurrentAdmin();
+    expect(headersOf(fetchMock.mock.calls[0]).Authorization).toBe('Bearer a-stored-token');
+  });
+
+  it('getPrioritizedApplications sends Authorization: Bearer <token>', async () => {
+    await api.getPrioritizedApplications();
     expect(headersOf(fetchMock.mock.calls[0]).Authorization).toBe('Bearer a-stored-token');
   });
 
@@ -228,6 +256,20 @@ describe('401 handling — centralized token clearing', () => {
     );
 
     await expect(api.getAllServices()).rejects.toThrow(ApiError);
+    expect(clearToken).toHaveBeenCalledTimes(1);
+  });
+
+  it('a 401 on getPrioritizedApplications clears the stored token', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        json: async () => ({ detail: 'Could not validate credentials' }),
+      }),
+    );
+
+    await expect(api.getPrioritizedApplications()).rejects.toThrow(ApiError);
     expect(clearToken).toHaveBeenCalledTimes(1);
   });
 

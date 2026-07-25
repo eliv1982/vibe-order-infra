@@ -27,6 +27,17 @@
   --color-danger-bg: #fbede7;
   --color-danger-border: #e3b7a6;
 
+  /* Priority scoring accents (admin "Заявки" section) — hot/medium/low
+     always ship with a text label too, so these are a supporting visual
+     cue, never the only signal (WCAG 1.4.1). */
+  --color-priority-hot-bg: #f8ddca;
+  --color-priority-hot-border: #d97a45;
+  --color-priority-hot-text: #8a3d15;
+
+  --color-priority-low-bg: #eef1f3;
+  --color-priority-low-border: #b9c3ca;
+  --color-priority-low-text: #55636b;
+
   --shadow-sm: 0 2px 10px rgba(120, 96, 40, 0.07);
   --shadow-md: 0 12px 32px rgba(120, 96, 40, 0.1);
   --shadow-lg: 0 24px 60px rgba(120, 96, 40, 0.16);
@@ -973,6 +984,371 @@ fieldset legend {
   align-self: flex-end;
 }
 
+.admin-section-heading {
+  margin-bottom: 20px;
+}
+
+/* ==========================================================================
+   Admin tabs (Услуги / Заявки)
+   ========================================================================== */
+
+.admin-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 28px;
+  border-bottom: 1px solid var(--color-border-soft);
+}
+
+.admin-tab {
+  appearance: none;
+  background: none;
+  border: none;
+  border-bottom: 3px solid transparent;
+  margin-bottom: -1px;
+  padding: 10px 18px;
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition:
+    color 0.2s ease,
+    border-color 0.2s ease;
+}
+
+.admin-tab:hover {
+  color: var(--color-gold-dark);
+}
+
+.admin-tab[aria-selected='true'] {
+  color: var(--color-gold-dark);
+  border-bottom-color: var(--color-gold);
+}
+
+/* ==========================================================================
+   Admin — applications (explainable priority scoring)
+   ========================================================================== */
+
+.applications-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.applications-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.filter-chip {
+  appearance: none;
+  padding: 8px 16px;
+  border-radius: var(--radius-pill);
+  border: 1.5px solid var(--color-border);
+  background: var(--color-surface);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition:
+    border-color 0.2s ease,
+    background-color 0.2s ease,
+    color 0.2s ease;
+}
+
+.filter-chip:hover {
+  border-color: var(--color-gold);
+}
+
+.filter-chip[aria-pressed='true'] {
+  border-color: var(--color-gold);
+  background: var(--color-gold-bg);
+  color: var(--color-gold-dark);
+}
+
+.applications-search-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.applications-search-row input[type='search'] {
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  border: 1.5px solid var(--color-border);
+  background: var(--color-surface);
+  min-width: 220px;
+}
+
+.applications-search-row input[type='search']:focus {
+  border-color: var(--color-gold);
+  box-shadow: 0 0 0 4px rgba(199, 154, 70, 0.15);
+  outline: none;
+}
+
+.applications-count {
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
+
+.applications-grid {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  margin-bottom: 24px;
+}
+
+.application-card {
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.application-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.application-card-top h3 {
+  font-size: 1.05rem;
+  margin-bottom: 4px;
+  overflow-wrap: break-word;
+}
+
+.application-card-service {
+  color: var(--color-text-muted);
+  font-size: 0.88rem;
+}
+
+.priority-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 5px 12px;
+  border-radius: var(--radius-pill);
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.priority-badge--hot {
+  background: var(--color-priority-hot-bg);
+  border-color: var(--color-priority-hot-border);
+  color: var(--color-priority-hot-text);
+}
+
+.priority-badge--medium {
+  background: var(--color-gold-bg);
+  border-color: var(--color-gold-soft);
+  color: var(--color-gold-dark);
+}
+
+.priority-badge--low {
+  background: var(--color-priority-low-bg);
+  border-color: var(--color-priority-low-border);
+  color: var(--color-priority-low-text);
+}
+
+/* Fallback for a runtime priority_level that isn't hot/medium/low — never
+   used as a raw class name (see priorityBadgeHtml in adminApplications.ts),
+   just this fixed neutral token. */
+.priority-badge--unknown {
+  background: var(--color-bg-alt);
+  border-color: var(--color-border);
+  color: var(--color-text-faint);
+}
+
+.application-card-facts {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px 16px;
+  margin: 0;
+}
+
+.application-card-facts div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.application-card-facts dt {
+  font-size: 0.72rem;
+  color: var(--color-text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.application-card-facts dd {
+  margin: 0;
+  font-size: 0.9rem;
+  overflow-wrap: break-word;
+}
+
+.application-card-priority {
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.application-card-score {
+  font-weight: 700;
+  font-size: 1.05rem;
+  color: var(--color-gold-dark);
+}
+
+.application-card-action,
+.application-card-team {
+  font-size: 0.86rem;
+  color: var(--color-text-muted);
+  margin: 0;
+}
+
+.application-card-pm-flag {
+  display: inline-flex;
+  align-self: flex-start;
+  font-size: 0.76rem;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--color-gold-bg);
+  color: var(--color-gold-dark);
+  border: 1px solid var(--color-gold-soft);
+  margin: 0;
+}
+
+.application-card-actions {
+  margin-top: auto;
+}
+
+/* ==========================================================================
+   Application detail modal
+   ========================================================================== */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(46, 42, 34, 0.55);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 40px 20px;
+  z-index: 50;
+  overflow-y: auto;
+}
+
+.modal-overlay[hidden] {
+  display: none;
+}
+
+.modal-window {
+  position: relative;
+  width: 100%;
+  max-width: 640px;
+  background: var(--color-surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  padding: 36px 32px 32px;
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+}
+
+.modal-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--color-text-muted);
+}
+
+.modal-close:hover {
+  border-color: var(--color-gold);
+  color: var(--color-gold-dark);
+}
+
+.modal-window h2 {
+  font-size: 1.25rem;
+  margin-bottom: 20px;
+  padding-right: 40px;
+  overflow-wrap: break-word;
+}
+
+.modal-section {
+  margin-bottom: 24px;
+}
+
+.modal-section h3 {
+  font-size: 1rem;
+  margin-bottom: 12px;
+  color: var(--color-gold-dark);
+}
+
+.modal-section dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px 20px;
+  margin: 0;
+}
+
+.modal-section dl div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.modal-section dt {
+  font-size: 0.72rem;
+  color: var(--color-text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.modal-section dd {
+  margin: 0;
+  font-size: 0.95rem;
+  overflow-wrap: break-word;
+}
+
+.reasons-list {
+  margin: 0 0 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.reasons-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-soft);
+  border: 1px solid var(--color-border-soft);
+  font-size: 0.86rem;
+}
+
+.reason-points {
+  font-weight: 700;
+  color: var(--color-gold-dark);
+  white-space: nowrap;
+}
+
 /* ==========================================================================
    Not found
    ========================================================================== */
@@ -1013,5 +1389,27 @@ fieldset legend {
   .footer-inner {
     flex-direction: column;
     text-align: center;
+  }
+
+  .applications-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .applications-search-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .applications-search-row input[type='search'] {
+    min-width: 0;
+  }
+
+  .application-card-facts {
+    grid-template-columns: 1fr;
+  }
+
+  .modal-window {
+    padding: 32px 20px 24px;
   }
 }
