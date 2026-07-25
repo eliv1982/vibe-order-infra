@@ -1350,6 +1350,160 @@ fieldset legend {
 }
 
 /* ==========================================================================
+   Admin — Статистика (behavior analytics)
+   ========================================================================== */
+
+.analytics-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.analytics-periods {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.analytics-range {
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+  margin-bottom: 12px;
+}
+
+.analytics-caption {
+  color: var(--color-text-faint);
+  font-size: 0.85rem;
+  margin-bottom: 24px;
+}
+
+.analytics-kpi-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  margin-bottom: 8px;
+}
+
+.analytics-kpi-group h4 {
+  font-size: 0.95rem;
+  color: var(--color-gold-dark);
+  margin-bottom: 10px;
+}
+
+.analytics-kpi-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+}
+
+.analytics-kpi-card {
+  padding: 16px 18px;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-soft);
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.analytics-kpi-label {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+}
+
+.analytics-kpi-value {
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: var(--color-text);
+  overflow-wrap: break-word;
+}
+
+.analytics-section {
+  margin-bottom: 28px;
+}
+
+.analytics-section h4 {
+  font-size: 1rem;
+  margin-bottom: 14px;
+  color: var(--color-gold-dark);
+}
+
+.analytics-bar-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.analytics-bar-item {
+  padding: 14px 16px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-soft);
+  border: 1px solid var(--color-border-soft);
+}
+
+.analytics-bar-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.analytics-bar-name {
+  font-weight: 600;
+  overflow-wrap: break-word;
+}
+
+.analytics-bar-meta {
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.analytics-bar-track {
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--color-bg-alt);
+  overflow: hidden;
+}
+
+.analytics-bar-fill {
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--color-gold);
+}
+
+.analytics-section-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px 16px;
+  margin: 0 0 10px;
+}
+
+.analytics-section-facts div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.analytics-section-facts dt {
+  font-size: 0.7rem;
+  color: var(--color-text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.analytics-section-facts dd {
+  margin: 0;
+  font-size: 0.88rem;
+  overflow-wrap: break-word;
+}
+
+/* ==========================================================================
    Not found
    ========================================================================== */
 
@@ -1411,5 +1565,23 @@ fieldset legend {
 
   .modal-window {
     padding: 32px 20px 24px;
+  }
+
+  .analytics-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .analytics-kpi-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .analytics-bar-row {
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .analytics-section-facts {
+    grid-template-columns: 1fr;
   }
 }

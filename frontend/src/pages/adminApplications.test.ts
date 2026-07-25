@@ -1,8 +1,14 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../api/client';
-import type { ApplicationPriorityRead, ApplicationRead, PrioritizedApplicationList } from '../api/types';
+import type {
+  ApplicationBehaviorAnalytics,
+  ApplicationPriorityRead,
+  ApplicationRead,
+  PrioritizedApplicationList,
+} from '../api/types';
 import { formatBudget } from '../utils/format';
+import { formatAnalyticsDateTime } from './adminAnalytics';
 import {
   filterApplications,
   formatApplicationBudget,
@@ -26,6 +32,7 @@ vi.mock('../api/client', async (importOriginal) => {
     ...actual,
     api: {
       getPrioritizedApplications: vi.fn(),
+      getApplicationBehaviorAnalytics: vi.fn(),
     },
   };
 });
@@ -91,6 +98,26 @@ function makeList(items: ApplicationPriorityRead[]): PrioritizedApplicationList 
   return { items, total: items.length, skip: 0, limit: 100 };
 }
 
+function makeAnalyticsDetail(overrides: Partial<ApplicationBehaviorAnalytics> = {}): ApplicationBehaviorAnalytics {
+  return {
+    application_id: 1,
+    has_metrics: false,
+    time_on_page_seconds: null,
+    return_count: null,
+    clicked_buttons: [],
+    section_activity: [],
+    total_button_clicks: 0,
+    recorded_at: null,
+    ...overrides,
+  };
+}
+
+/** Bypasses ApplicationBehaviorAnalytics's typed fields on purpose — builds
+ * a malformed/hostile wire fixture, mirroring makeUnsafeItem below. */
+function makeUnsafeAnalyticsDetail(overrides: Record<string, unknown>): ApplicationBehaviorAnalytics {
+  return { ...makeAnalyticsDetail(), has_metrics: true, ...overrides } as unknown as ApplicationBehaviorAnalytics;
+}
+
 function makeHost(overrides: Partial<ApplicationsSectionHost> = {}): ApplicationsSectionHost {
   return {
     isActive: () => true,
@@ -111,10 +138,13 @@ function mountAndActivate(
   return controller;
 }
 
-async function renderWithItems(items: ApplicationPriorityRead[]): Promise<HTMLElement> {
+async function renderWithItems(
+  items: ApplicationPriorityRead[],
+  host: ApplicationsSectionHost = makeHost(),
+): Promise<HTMLElement> {
   vi.mocked(api.getPrioritizedApplications).mockResolvedValue(makeList(items));
   const container = document.createElement('div');
-  mountAndActivate(container, makeHost());
+  mountAndActivate(container, host);
   await vi.waitFor(() => expect(container.querySelectorAll('.application-card').length).toBe(items.length));
   return container;
 }
@@ -142,6 +172,10 @@ async function flush(): Promise<void> {
 beforeEach(() => {
   vi.clearAllMocks();
   nextId = 1;
+  // Most tests don't care about the modal's lazily-loaded behavior detail —
+  // give it a harmless default so opening the modal never leaves an
+  // unhandled rejection lying around; tests that do care override this.
+  vi.mocked(api.getApplicationBehaviorAnalytics).mockResolvedValue(makeAnalyticsDetail());
 });
 
 // --- API ---------------------------------------------------------------
@@ -461,7 +495,13 @@ describe('detail modal', () => {
     container.querySelector<HTMLButtonElement>('[data-action="view"]')!.click();
 
     const headings = [...container.querySelectorAll('.modal-section h3')].map((h) => h.textContent);
-    expect(headings).toEqual(['Клиент', 'Автомобиль', 'Обращение', 'Приоритет обработки']);
+    expect(headings).toEqual([
+      'Клиент',
+      'Автомобиль',
+      'Обращение',
+      'Приоритет обработки',
+      'Поведение на странице',
+    ]);
   });
 
   it('shows scoring reasons with their label and a signed points value', async () => {
@@ -1061,6 +1101,233 @@ describe('stale dataset guard — filter/search during a pending or failed refre
     expect(container.textContent).toContain('Виктор');
     expect(container.textContent).not.toContain('Анна');
     expect(container.textContent).not.toContain('Не удалось загрузить');
+  });
+});
+
+// --- Application behavior analytics (lazy-loaded modal detail) -----------
+
+describe('application behavior analytics — modal detail', () => {
+  it('shows a loading state immediately, before the detail request resolves', async () => {
+    const deferred = createDeferred<ApplicationBehaviorAnalytics>();
+    vi.mocked(api.getApplicationBehaviorAnalytics).mockReturnValueOnce(deferred.promise);
+    const container = await renderWithItems([makeItem()]);
+
+    container.querySelector<HTMLButtonElement>('[data-action="view"]')!.click();
+
+    const analyticsEl = container.querySelector<HTMLElement>('#application-modal-analytics-content')!;
+    expect(analyticsEl.textContent).toContain('Загружаем поведенческие метрики…');
+  });
+
+  it('requests the analytics for the opened application', async () => {
+    const app = makeApplication({ id: 55 });
+    const container = await renderWithItems([makeItem({ application: app })]);
+    container.querySelector<HTMLButtonElement>('[data-action="view"]')!.click();
+
+    await vi.waitFor(() => expect(api.getApplicationBehaviorAnalytics).toHaveBeenCalledWith(55));
+  });
+
+  it('shows the "no metrics" message when has_metrics is false', async () => {
+    vi.mocked(api.getApplicationBehaviorAnalytics).mockResolvedValueOnce(makeAnalyticsDetail({ has_metrics: false }));
+    const container = await renderWithItems([makeItem()]);
+    container.querySelector<HTMLButtonElement>('[data-action="view"]')!.click();
+
+    await vi.waitFor(() =>
+      expect(container.querySelector('#application-modal-analytics-content')!.textContent).toContain(
+        'Для этой заявки поведенческие метрики не записаны.',
+      ),
+    );
+  });
+
+  it('shows time on page, return count, click count, recorded_at, buttons and sections when metrics exist', async () => {
+    const detail = makeAnalyticsDetail({
+      has_metrics: true,
+      time_on_page_seconds: 192,
+      return_count: 2,
+      total_button_clicks: 5,
+      recorded_at: '2026-07-20T10:05:00Z',
+      clicked_buttons: [{ name: 'Отправить', count: 5, share_percent: 100 }],
+      section_activity: [
+        { section: 'Контакты', total_duration_seconds: 60, average_duration_seconds: 30, interactions_count: 2, share_percent: 100 },
+      ],
+    });
+    vi.mocked(api.getApplicationBehaviorAnalytics).mockResolvedValueOnce(detail);
+    const container = await renderWithItems([makeItem()]);
+    container.querySelector<HTMLButtonElement>('[data-action="view"]')!.click();
+
+    const analyticsEl = container.querySelector<HTMLElement>('#application-modal-analytics-content')!;
+    await vi.waitFor(() => expect(analyticsEl.textContent).toContain('3 мин 12 сек')); // time on page
+    expect(analyticsEl.textContent).toContain('2'); // return count
+    expect(analyticsEl.textContent).toContain('5'); // total button clicks
+    expect(analyticsEl.textContent).toContain(formatAnalyticsDateTime('2026-07-20T10:05:00Z'));
+    expect(analyticsEl.textContent).toContain('Отправить');
+    expect(analyticsEl.textContent).toContain('Контакты');
+    expect(analyticsEl.textContent).toContain('Среднее время одного наведения');
+    // Overview-level KPIs (e.g. "applications_count") are never repeated here.
+    expect(analyticsEl.textContent).not.toContain('Заявки за период');
+  });
+
+  it('shows a neutral error message and a working retry on a non-401 failure', async () => {
+    vi.mocked(api.getApplicationBehaviorAnalytics).mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    const container = await renderWithItems([makeItem()]);
+    container.querySelector<HTMLButtonElement>('[data-action="view"]')!.click();
+
+    const analyticsEl = container.querySelector<HTMLElement>('#application-modal-analytics-content')!;
+    await vi.waitFor(() => expect(analyticsEl.textContent).toContain('Не удалось загрузить поведенческие метрики.'));
+
+    vi.mocked(api.getApplicationBehaviorAnalytics).mockResolvedValueOnce(makeAnalyticsDetail({ has_metrics: false }));
+    analyticsEl.querySelector<HTMLButtonElement>('#application-modal-analytics-retry')!.click();
+
+    await vi.waitFor(() =>
+      expect(analyticsEl.textContent).toContain('Для этой заявки поведенческие метрики не записаны.'),
+    );
+  });
+
+  it('a 401 calls host.onSessionExpired, not the generic error message', async () => {
+    vi.mocked(api.getApplicationBehaviorAnalytics).mockRejectedValueOnce(new ApiError('nope', 401));
+    const onSessionExpired = vi.fn();
+    const container = await renderWithItems([makeItem()], makeHost({ onSessionExpired }));
+    container.querySelector<HTMLButtonElement>('[data-action="view"]')!.click();
+
+    await vi.waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1));
+    expect(container.querySelector('#application-modal-analytics-content')!.textContent).not.toContain(
+      'Не удалось загрузить',
+    );
+  });
+
+  it('closing the modal before the response arrives discards it — no late paint', async () => {
+    const deferred = createDeferred<ApplicationBehaviorAnalytics>();
+    vi.mocked(api.getApplicationBehaviorAnalytics).mockReturnValueOnce(deferred.promise);
+    const container = await renderWithItems([makeItem()]);
+    container.querySelector<HTMLButtonElement>('[data-action="view"]')!.click();
+    await vi.waitFor(() => expect(api.getApplicationBehaviorAnalytics).toHaveBeenCalledTimes(1));
+
+    container.querySelector<HTMLButtonElement>('#application-modal-close')!.click();
+    deferred.resolve(makeAnalyticsDetail({ has_metrics: true, time_on_page_seconds: 999 }));
+    await flush();
+
+    expect(container.querySelector('#application-modal-overlay')!.hasAttribute('hidden')).toBe(true);
+    expect(container.querySelector('#application-modal-analytics-content')!.textContent).not.toContain(
+      '999 сек',
+    );
+  });
+
+  it('opening application A then B: a late response for A never overwrites B', async () => {
+    const appA = makeApplication({ id: 1, first_name: 'Анна' });
+    const appB = makeApplication({ id: 2, first_name: 'Борис' });
+    const deferredA = createDeferred<ApplicationBehaviorAnalytics>();
+    vi.mocked(api.getApplicationBehaviorAnalytics).mockReturnValueOnce(deferredA.promise);
+    const container = await renderWithItems([makeItem({ application: appA }), makeItem({ application: appB })]);
+
+    const viewButtons = container.querySelectorAll<HTMLButtonElement>('[data-action="view"]');
+    viewButtons[0]!.click(); // open A — request pending
+    await vi.waitFor(() => expect(api.getApplicationBehaviorAnalytics).toHaveBeenCalledWith(1));
+
+    vi.mocked(api.getApplicationBehaviorAnalytics).mockResolvedValueOnce(
+      makeAnalyticsDetail({ has_metrics: true, time_on_page_seconds: 42 }),
+    );
+    viewButtons[1]!.click(); // open B before A resolved
+    await vi.waitFor(() =>
+      expect(container.querySelector('#application-modal-analytics-content')!.textContent).toContain('42 сек'),
+    );
+
+    // A's stale response now arrives — must not overwrite B's content.
+    deferredA.resolve(makeAnalyticsDetail({ has_metrics: true, time_on_page_seconds: 999 }));
+    await flush();
+
+    expect(container.querySelector('#application-modal-body')!.textContent).toContain('Борис');
+    expect(container.querySelector('#application-modal-analytics-content')!.textContent).toContain('42 сек');
+    expect(container.querySelector('#application-modal-analytics-content')!.textContent).not.toContain('999 сек');
+  });
+
+  it('deactivating the applications tab invalidates a pending detail request', async () => {
+    const deferred = createDeferred<ApplicationBehaviorAnalytics>();
+    vi.mocked(api.getApplicationBehaviorAnalytics).mockReturnValueOnce(deferred.promise);
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValue(makeList([makeItem()]));
+    const container = document.createElement('div');
+    const controller = mountAdminApplications(container, makeHost());
+    controller.activate();
+    await vi.waitFor(() => expect(container.querySelector('.application-card')).not.toBeNull());
+
+    container.querySelector<HTMLButtonElement>('[data-action="view"]')!.click();
+    await vi.waitFor(() => expect(api.getApplicationBehaviorAnalytics).toHaveBeenCalledTimes(1));
+
+    controller.deactivate();
+    deferred.resolve(makeAnalyticsDetail({ has_metrics: true, time_on_page_seconds: 999 }));
+    await flush();
+
+    expect(container.querySelector('#application-modal-overlay')!.hasAttribute('hidden')).toBe(true);
+  });
+
+  it('a malformed application id (hostile runtime value) fails gracefully instead of crashing', async () => {
+    vi.mocked(api.getApplicationBehaviorAnalytics).mockRejectedValueOnce(new Error('Invalid application id'));
+    const item = makeUnsafeItem({
+      application: { ...makeApplication(), id: '"><img src=x onerror=alert(1)>' },
+    });
+    const container = await renderWithItems([item]);
+    container.querySelector<HTMLButtonElement>('[data-action="view"]')!.click();
+
+    await vi.waitFor(() =>
+      expect(container.querySelector('#application-modal-analytics-content')!.textContent).toContain(
+        'Не удалось загрузить поведенческие метрики.',
+      ),
+    );
+    expect(container.querySelector('img')).toBeNull();
+  });
+
+  it('renders malformed runtime detail values safely (no NaN/undefined/[object Object])', async () => {
+    const detail = makeUnsafeAnalyticsDetail({
+      time_on_page_seconds: 'lots',
+      return_count: Number.NaN,
+      total_button_clicks: -1,
+      clicked_buttons: [{ name: 123, count: 'many', share_percent: 'lots' }],
+    });
+    vi.mocked(api.getApplicationBehaviorAnalytics).mockResolvedValueOnce(detail);
+    const container = await renderWithItems([makeItem()]);
+    container.querySelector<HTMLButtonElement>('[data-action="view"]')!.click();
+
+    const analyticsEl = container.querySelector<HTMLElement>('#application-modal-analytics-content')!;
+    await vi.waitFor(() => expect(api.getApplicationBehaviorAnalytics).toHaveBeenCalledTimes(1));
+    await flush();
+    expect(analyticsEl.textContent).not.toContain('NaN');
+    expect(analyticsEl.textContent).not.toContain('undefined');
+    expect(analyticsEl.textContent).not.toContain('[object Object]');
+    expect(analyticsEl.textContent).toContain('—'); // malformed count/time fall back to the dash
+  });
+
+  it('an XSS payload in a clicked button name renders as text, not markup', async () => {
+    const payload = '<img src=x onerror="window.__pwned_detail_button = true">';
+    const detail = makeAnalyticsDetail({
+      has_metrics: true,
+      clicked_buttons: [{ name: payload, count: 1, share_percent: 100 }],
+    });
+    vi.mocked(api.getApplicationBehaviorAnalytics).mockResolvedValueOnce(detail);
+    const container = await renderWithItems([makeItem()]);
+    container.querySelector<HTMLButtonElement>('[data-action="view"]')!.click();
+
+    await vi.waitFor(() => expect(api.getApplicationBehaviorAnalytics).toHaveBeenCalledTimes(1));
+    await flush();
+
+    expect(container.querySelector('img')).toBeNull();
+    expect((window as unknown as { __pwned_detail_button?: boolean }).__pwned_detail_button).toBeUndefined();
+  });
+
+  it('an XSS payload in a section name renders as text, not markup', async () => {
+    const payload = '"><svg onload="window.__pwned_detail_section = true">';
+    const detail = makeAnalyticsDetail({
+      has_metrics: true,
+      section_activity: [
+        { section: payload, total_duration_seconds: 1, average_duration_seconds: 1, interactions_count: 1, share_percent: 100 },
+      ],
+    });
+    vi.mocked(api.getApplicationBehaviorAnalytics).mockResolvedValueOnce(detail);
+    const container = await renderWithItems([makeItem()]);
+    container.querySelector<HTMLButtonElement>('[data-action="view"]')!.click();
+
+    await vi.waitFor(() => expect(api.getApplicationBehaviorAnalytics).toHaveBeenCalledTimes(1));
+    await flush();
+
+    expect(container.querySelector('svg')).toBeNull();
+    expect((window as unknown as { __pwned_detail_section?: boolean }).__pwned_detail_section).toBeUndefined();
   });
 });
 
