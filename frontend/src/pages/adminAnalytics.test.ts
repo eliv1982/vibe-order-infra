@@ -8,10 +8,12 @@ import {
   formatAnalyticsDateTime,
   formatAnalyticsName,
   formatAverageReturns,
+  formatButtonAnalyticsName,
   formatCount,
   formatPercent,
   formatPeriodRange,
   formatSeconds,
+  formatSectionAnalyticsName,
   isOverviewEmpty,
   mountAdminAnalytics,
   normalizeCount,
@@ -399,10 +401,45 @@ describe('popular buttons', () => {
     expect(item.textContent).not.toContain('NaN');
     expect(item.textContent).not.toContain('undefined');
     expect(item.textContent).not.toContain('[object Object]');
-    expect(item.querySelector('.analytics-bar-name')!.textContent).toBe('Без названия');
+    expect(item.querySelector('.analytics-bar-name')!.textContent).toBe('—');
     expect(item.textContent).toContain('—');
     const fill = item.querySelector<HTMLElement>('.analytics-bar-fill')!;
     expect(fill.style.width).toBe('0%');
+  });
+
+  it('maps every known collector button identifier to its Russian label, in backend order', async () => {
+    const overview = makeOverview({
+      popular_buttons: [
+        { name: 'hero_cta', count: 3, share_percent: 40 },
+        { name: 'service_card', count: 2, share_percent: 30 },
+        { name: 'submit_application', count: 1, share_percent: 20 },
+        { name: 'change_service', count: 1, share_percent: 10 },
+      ],
+    });
+    const container = await renderWithOverview(overview);
+
+    const names = [...container.querySelectorAll<HTMLElement>('#analytics-buttons .analytics-bar-name')].map(
+      (el) => el.textContent,
+    );
+    expect(names).toEqual([
+      'Основная кнопка на главном экране',
+      'Выбор услуги',
+      'Отправка заявки',
+      'Смена услуги',
+    ]);
+    // The technical wire identifiers must never leak into the visible text.
+    const text = container.querySelector('#analytics-buttons')!.textContent ?? '';
+    expect(text).not.toContain('hero_cta');
+    expect(text).not.toContain('service_card');
+    expect(text).not.toContain('submit_application');
+    expect(text).not.toContain('change_service');
+  });
+
+  it('shows an unrecognized-but-safe button identifier as-is, without merging into a known label', async () => {
+    const container = await renderWithOverview(
+      makeOverview({ popular_buttons: [{ name: 'some_future_button', count: 1, share_percent: 100 }] }),
+    );
+    expect(container.textContent).toContain('some_future_button');
   });
 
   it('shows a dedicated empty message and no list when there are no buttons', async () => {
@@ -483,7 +520,59 @@ describe('section activity', () => {
     const item = container.querySelector<HTMLElement>('#analytics-sections .analytics-bar-item')!;
     expect(item.textContent).not.toContain('NaN');
     expect(item.textContent).not.toContain('Infinity');
-    expect(item.querySelector('.analytics-bar-name')!.textContent).toBe('Без названия секции');
+    expect(item.querySelector('.analytics-bar-name')!.textContent).toBe('—');
+  });
+
+  it('maps every known collector section identifier to its Russian label, in backend order', async () => {
+    const overview = makeOverview({
+      section_activity: [
+        { section: 'hero', total_duration_seconds: 10, average_duration_seconds: 5, interactions_count: 2, share_percent: 50 },
+        { section: 'services', total_duration_seconds: 8, average_duration_seconds: 4, interactions_count: 2, share_percent: 30 },
+        {
+          section: 'application_form',
+          total_duration_seconds: 6,
+          average_duration_seconds: 3,
+          interactions_count: 2,
+          share_percent: 20,
+        },
+      ],
+    });
+    const container = await renderWithOverview(overview);
+
+    const names = [...container.querySelectorAll<HTMLElement>('#analytics-sections .analytics-bar-name')].map(
+      (el) => el.textContent,
+    );
+    expect(names).toEqual(['Главный экран', 'Раздел услуг', 'Форма заявки']);
+    const text = container.querySelector('#analytics-sections')!.textContent ?? '';
+    expect(text).not.toContain('hero_cta');
+    expect(text).not.toContain('application_form');
+    // "services" as a standalone technical identifier must not leak either
+    // (its Russian label "Раздел услуг" does not contain the Latin word).
+    expect(container.querySelector('#analytics-sections')!.innerHTML).not.toContain('>services<');
+  });
+
+  it('shows an unrecognized-but-safe section identifier as-is, without merging into a known label', async () => {
+    const container = await renderWithOverview(
+      makeOverview({
+        section_activity: [
+          { section: 'future_section', total_duration_seconds: 1, average_duration_seconds: 1, interactions_count: 1, share_percent: 100 },
+        ],
+      }),
+    );
+    expect(container.textContent).toContain('future_section');
+  });
+
+  it('does not case-insensitively merge a differently-cased identifier into a known label', async () => {
+    const container = await renderWithOverview(
+      makeOverview({
+        section_activity: [
+          { section: 'HERO', total_duration_seconds: 1, average_duration_seconds: 1, interactions_count: 1, share_percent: 100 },
+        ],
+      }),
+    );
+    // Only an exact-case match ("hero") is mapped; "HERO" is shown verbatim.
+    expect(container.textContent).toContain('HERO');
+    expect(container.textContent).not.toContain('Главный экран');
   });
 
   it('shows a dedicated empty message when there is no section activity', async () => {
@@ -781,6 +870,63 @@ describe('formatAnalyticsName', () => {
 
   it.each(cases)('formatAnalyticsName(%p) -> %p', (input, expected) => {
     expect(formatAnalyticsName(input)).toBe(expected);
+  });
+});
+
+describe('formatButtonAnalyticsName / formatSectionAnalyticsName', () => {
+  const buttonCases: Array<[unknown, string]> = [
+    ['hero_cta', 'Основная кнопка на главном экране'],
+    ['service_card', 'Выбор услуги'],
+    ['submit_application', 'Отправка заявки'],
+    ['change_service', 'Смена услуги'],
+    // Unrecognized but safe: shown as-is, never dropped or guessed.
+    ['some_future_button', 'some_future_button'],
+    ['  hero_cta  ', 'Основная кнопка на главном экране'], // trimmed before lookup
+    // Malformed/absent -> the shared "—" placeholder (not a mapped label).
+    ['', '—'],
+    ['   ', '—'],
+    [null, '—'],
+    [undefined, '—'],
+    [42, '—'],
+    [{}, '—'],
+    [[], '—'],
+  ];
+
+  it.each(buttonCases)('formatButtonAnalyticsName(%p) -> %p', (input, expected) => {
+    expect(formatButtonAnalyticsName(input)).toBe(expected);
+  });
+
+  const sectionCases: Array<[unknown, string]> = [
+    ['application_form', 'Форма заявки'],
+    ['services', 'Раздел услуг'],
+    ['hero', 'Главный экран'],
+    ['future_section', 'future_section'],
+    ['', '—'],
+    [null, '—'],
+    [undefined, '—'],
+    [42, '—'],
+    [{}, '—'],
+    [[], '—'],
+  ];
+
+  it.each(sectionCases)('formatSectionAnalyticsName(%p) -> %p', (input, expected) => {
+    expect(formatSectionAnalyticsName(input)).toBe(expected);
+  });
+
+  it('never case-insensitively merges a differently-cased identifier into a known label', () => {
+    expect(formatButtonAnalyticsName('HERO_CTA')).toBe('HERO_CTA');
+    expect(formatButtonAnalyticsName('Hero_Cta')).toBe('Hero_Cta');
+    expect(formatSectionAnalyticsName('HERO')).toBe('HERO');
+    expect(formatSectionAnalyticsName('Services')).toBe('Services');
+  });
+
+  it('an XSS-like unknown identifier is returned as plain text, not interpreted as markup by the caller', () => {
+    const payload = '<img src=x onerror="window.__pwned_pure = true">';
+    expect(formatButtonAnalyticsName(payload)).toBe(payload);
+    expect(formatSectionAnalyticsName(payload)).toBe(payload);
+    // This helper itself never touches the DOM — escaping is the caller's
+    // job (buttonAnalyticsListHtml/sectionAnalyticsListHtml via escapeHtml),
+    // exercised end-to-end by the "renders as text, not markup" tests above.
   });
 });
 

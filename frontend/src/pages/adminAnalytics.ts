@@ -167,6 +167,49 @@ export function formatAnalyticsName(value: unknown, fallback = 'Без назв�
   return trimmed.length > 0 ? trimmed : fallback;
 }
 
+/**
+ * Allowlist mapping from a collector `clicked_buttons[].name` wire
+ * identifier (see frontend/src/pages/home.ts's `trackClick()` call sites)
+ * to its Russian display label. Deliberately an exact-match lookup — a
+ * button identifier not in this map is not a typo/variant of one that is,
+ * so it is never merged (case-insensitively or otherwise) with a known
+ * one; it is shown as its own (trimmed, escaped) text instead. */
+const BUTTON_ANALYTICS_NAME_MAP: Readonly<Record<string, string>> = {
+  hero_cta: 'Основная кнопка на главном экране',
+  service_card: 'Выбор услуги',
+  submit_application: 'Отправка заявки',
+  change_service: 'Смена услуги',
+};
+
+/** Same allowlist convention as BUTTON_ANALYTICS_NAME_MAP, for a
+ * `section_activity[].section` / `cursor_hover_data` key (see
+ * frontend/src/pages/home.ts's `data-hover-section` attributes). */
+const SECTION_ANALYTICS_NAME_MAP: Readonly<Record<string, string>> = {
+  application_form: 'Форма заявки',
+  services: 'Раздел услуг',
+  hero: 'Главный экран',
+};
+
+/** Pure — unit tested. Wraps formatAnalyticsName with a "—" fallback (this
+ * display context has no separate "Без названия"-style placeholder), then
+ * maps a *known* collector button identifier to its Russian label. An
+ * unrecognized-but-otherwise-safe string (already trimmed/normalized by
+ * formatAnalyticsName) is shown as-is — never silently dropped, never
+ * guessed into a known label. The wire value itself (item.name) is never
+ * touched; only this rendered copy changes. */
+export function formatButtonAnalyticsName(value: unknown): string {
+  const normalized = formatAnalyticsName(value, '—');
+  if (normalized === '—') return normalized;
+  return BUTTON_ANALYTICS_NAME_MAP[normalized] ?? normalized;
+}
+
+/** Pure — unit tested. Section-name counterpart of formatButtonAnalyticsName. */
+export function formatSectionAnalyticsName(value: unknown): string {
+  const normalized = formatAnalyticsName(value, '—');
+  if (normalized === '—') return normalized;
+  return SECTION_ANALYTICS_NAME_MAP[normalized] ?? normalized;
+}
+
 const dateOnlyFormatter = new Intl.DateTimeFormat('ru-RU', {
   day: '2-digit',
   month: 'long',
@@ -238,7 +281,7 @@ export function buttonAnalyticsListHtml(items: ButtonAnalyticsItem[], emptyMessa
   }
   const rows = items
     .map((item) => {
-      const name = formatAnalyticsName(item?.name);
+      const name = formatButtonAnalyticsName(item?.name);
       const count = formatCount(item?.count);
       const percentText = formatPercent(item?.share_percent);
       const barWidth = percentBarWidth(item?.share_percent);
@@ -269,7 +312,7 @@ export function sectionAnalyticsListHtml(items: SectionAnalyticsItem[], emptyMes
   }
   const rows = items
     .map((item) => {
-      const name = formatAnalyticsName(item?.section, 'Без названия секции');
+      const name = formatSectionAnalyticsName(item?.section);
       const totalDuration = formatSeconds(item?.total_duration_seconds);
       const averageDuration = formatSeconds(item?.average_duration_seconds);
       const interactions = formatCount(item?.interactions_count);
