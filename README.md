@@ -103,9 +103,10 @@ host (backend, PostgreSQL, Registry сегодня так и сделаны, с�
                                                          ▼
                                             SSH-туннель с локальной машины
 
-Watchtower: следит за образами всех сервисов (доступ к docker.sock), но
+Watchtower запущен в label-based opt-in режиме (доступ к docker.sock), но
+сейчас ни один сервис не включен в автоматическое обновление, поскольку
 label com.centurylinklabs.watchtower.enable=false у ВСЕХ сервисов, включая
-backend — автообновление сейчас никого не затрагивает.
+backend.
 ```
 
 Ключевые инварианты:
@@ -188,9 +189,11 @@ vibe-order-infra/
   пароля (`password_hash`), флаг `is_active`. Единственный источник правды
   о том, кто admin — используется JWT-аутентификацией (см. "Frontend" и
   "API и публичный security allowlist" ниже).
-- **Application** — клиентская заявка: контактные данные, сведения о
-  бизнесе, детали запроса (выбранная услуга, бюджет, срок), предпочитаемый
-  способ и время связи.
+- **Application** — клиентская заявка: контактные данные, автомобильная
+  анкета (использование и класс автомобиля, количество автомобилей, кто
+  обращается, марка/модель/год и состояние автомобиля), детали запроса
+  (формат обслуживания, тип обращения, желаемый срок записи, выбранная
+  услуга, бюджет), предпочитаемый способ и время связи.
 - **BehaviorMetric** — one-to-one с Application
   (`application_id UNIQUE REFERENCES applications(id) ON DELETE CASCADE`).
   Хранит агрегированные метрики поведения на странице: `time_on_page`,
@@ -226,7 +229,10 @@ vibe-order-infra/
 2. Пользователь выбирает услугу.
 3. Выбирает бюджет ползунком внутри диапазона услуги (`budget_min`..`budget_max`).
 4. Видит summary "Ваша заявка" с выбранной услугой и бюджетом.
-5. Заполняет форму (контактные данные, о бизнесе, детали запроса, способ связи).
+5. Заполняет форму: контактные данные; автомобильная анкета (использование
+   и класс автомобиля, количество автомобилей, кто обращается, марка/
+   модель/год и состояние автомобиля); детали запроса (формат
+   обслуживания, тип обращения, желаемый срок записи); способ связи.
 6. `POST /api/applications`.
 7. После успешного создания Application — `POST /api/behavior-metrics` с
    агрегированными метриками сессии.
@@ -439,14 +445,20 @@ fallback (см. "Nginx" ниже) и получают тот же `200` с `inde
 Сервисы: `postgres`, `backend`, `nginx`, `registry`, `watchtower`, `pgadmin`
 (профиль `admin`).
 
-**backend**: `build: ./backend`; сети — `app-net` (доступ к `postgres`) и
-`proxy-net` (доступность для Nginx); `depends_on: postgres: condition:
+**backend**: Compose-декларация — `build: ./backend` (build context для
+локальной разработки и для самого первого bootstrap, когда локального
+image еще нет). Фактическая production-доставка — отдельная: release
+image собирается вне VPS для `linux/amd64` и доставляется через private
+Registry (`registry-vibe.elivcloud.org`) с immutable tag, на VPS
+выполняется `docker pull`, а не `docker compose build` (см. "Порядок
+деплоя" ниже); сети — `app-net` (доступ к `postgres`) и `proxy-net`
+(доступность для Nginx); `depends_on: postgres: condition:
 service_healthy`; порт 8000 НЕ публикуется на host (нет `ports:`); лимит
 памяти 192M (reservation 128M, 0.50 cpu); `labels:
 com.centurylinklabs.watchtower.enable: "false"` — как и у остальных
-сервисов на данном этапе (backend только что реализован и еще не прошел
-достаточный период стабильной работы, чтобы доверить его пересоздание
-автообновлению).
+сервисов на данном этапе (backend относительно недавно вышел в production
+и еще не прошел достаточный период стабильной работы, чтобы доверить его
+пересоздание автообновлению).
 
 **nginx**: read-only bind mount `./frontend/dist:/usr/share/nginx/html:ro`
 (собирается вне контейнера, см. "Production build frontend" ниже), плюс
@@ -576,23 +588,49 @@ vulnerabilities**. Покрытие тестами (coverage) не измеря�
 
 ## Production build frontend
 
-`frontend/dist` собирается командой:
+`frontend/dist` собирается **вне VPS** — на отдельной build-машине или
+временным официальным Node Docker-контейнером там же, например:
 
 ```bash
 npm run build
-```
-
-На VPS Node.js/npm глобально не устанавливаются — сборка выполняется через
-временный официальный Node Docker-контейнер, например:
-
-```bash
+# или, без локального Node/npm, тем же принципом на build-машине:
 docker run --rm -v "$PWD/frontend:/app" -w /app node:22-slim sh -c "npm ci && npm run build"
 ```
 
 (Точная команда может отличаться деталями — важен принцип: сборка Node-
-инструментами происходит вне постоянно работающих контейнеров, сам образ
-`nginx:alpine` Node/npm не содержит.) Nginx раздает уже собранный
-`frontend/dist` через read-only bind mount
+инструментами происходит на build-машине, а не на самом VPS — на VPS с
+~1GB RAM сборка не рекомендуется, см. "Resource protection" ниже; сам
+образ `nginx:alpine`, работающий на VPS, Node/npm не содержит.)
+
+Результат сборки передается на VPS как **версионированный artifact с
+контрольной суммой**, а не заново собирается на месте:
+
+```bash
+tar -czf "frontend-dist-$(git rev-parse --short HEAD).tar.gz" -C frontend dist
+sha256sum "frontend-dist-$(git rev-parse --short HEAD).tar.gz" \
+  > "frontend-dist-$(git rev-parse --short HEAD).tar.gz.sha256"
+scp "frontend-dist-$(git rev-parse --short HEAD).tar.gz"* vibe-vps:/tmp/
+```
+
+На VPS перед разворачиванием контрольная сумма перепроверяется
+(`sha256sum -c ...sha256`) — распаковка происходит только после успешной
+проверки. Публикация выполняется в два шага, чтобы не было окна, когда
+`index.html` уже ссылается на хэшированные assets, которых еще нет на
+диске:
+
+1. Новые хэшированные файлы из `frontend/dist/assets/` копируются в
+   веб-корень (`./frontend/dist/assets/` на хосте) **без удаления** старых
+   файлов — старые хэшированные assets остаются доступны, пока на них
+   могут ссылаться уже загруженные в браузерах старые `index.html`.
+2. Только после этого `index.html` заменяется **атомарно** (`mv` внутри
+   одной файловой системы — атомарная операция на POSIX), когда все новые
+   assets уже на месте.
+
+Устаревшие хэшированные assets, на которые больше не ссылается ни один
+живой `index.html`, можно убрать best-effort уборкой не раньше следующего
+релиза — не автоматически и не в момент самого деплоя.
+
+Nginx раздает `frontend/dist` через read-only bind mount
 (`./frontend/dist:/usr/share/nginx/html:ro`, см. "Docker Compose" выше).
 
 ## Порядок деплоя
@@ -622,39 +660,90 @@ docker run --rm -v "$PWD/frontend:/app" -w /app node:22-slim sh -c "npm ci && np
 порядка (certbot на VPS, затем перезапуск Nginx); на текущем VPS уже
 выполнен.
 
-### Обновление / повторный деплой (текущий flow, с backend + frontend + admin/analytics)
+### Обновление / повторный деплой (текущий безопасный flow, применим к каждому будущему релизу)
 
-1. **Backup PostgreSQL — обязателен перед этим конкретным обновлением**, т.к.
-   оно добавляет новую таблицу `admins` через `Base.metadata.create_all()`
-   (Alembic пока не используется — см. "Ограничение: развертывание базы
-   данных" ниже). Не переходить к шагу 2, пока backup-файл не создан и не
-   проверен непустым.
-2. `git pull`/`git fetch` — обновить репозиторий на VPS.
-3. `docker compose config --quiet` — убедиться, что `.env` полон (включая
-   `JWT_SECRET_KEY`) и конфигурация валидна, до запуска чего-либо.
-4. Собрать backend-образ: `docker compose build backend`.
-5. Поднять/пересоздать backend: `docker compose up -d backend` (Compose
-   дождется `postgres` healthy благодаря `depends_on`). При старте backend
-   вызовет `Base.metadata.create_all()` — создаст отсутствующую таблицу
-   `admins`, существующие таблицы/данные не затрагивает.
-6. Собрать frontend вне хоста — временным официальным Node-контейнером
-   (см. "Production build frontend" выше) — `frontend/dist` обновляется на
-   хосте.
-7. Пересоздать/перезапустить `nginx` — конфигурация в этом релизе меняется
-   (body limit, `/admin`, финальный API allowlist), поэтому это обязательный
-   шаг, а не опциональный.
-8. `nginx -t` — проверить синтаксис конфигурации перед reload/restart.
-9. Smoke tests — см. "Production smoke checklist" ниже (публикация `/admin`,
-   первый admin, protected API без токена → `401`, `/docs`/`/openapi.json`/
-   `/redoc` снаружи недоступны и т.д.).
-10. `docker compose ps` — все сервисы в статусе `running`/`healthy`.
-11. `docker stats --no-stream` — сверить фактическое потребление
-    памяти/CPU с лимитами (особенно важно теперь, когда backend добавлен в
-    набор постоянно работающих сервисов — см. "Resource protection").
+Этот flow — не одноразовая процедура «добавить таблицу `admins`», а
+повторяемая процедура для **любого** будущего обновления backend/frontend.
+Backup PostgreSQL перед обновлением обязателен только тогда, когда релиз
+меняет схему БД (добровольная DDL-операция через
+`Base.metadata.create_all()` — см. "Ограничение: развертывание базы
+данных" ниже); для чисто frontend-релиза или backend-релиза без изменений
+схемы этот шаг не обязателен, но не будет лишним.
+
+**Backend (собран вне VPS, доставлен через private Registry):**
+
+1. Собрать release image **вне VPS**, для целевой архитектуры VPS
+   (`linux/amd64`), с immutable tag (например, git SHA или semver — не
+   `:latest`):
+   ```bash
+   docker buildx build --platform linux/amd64 \
+     -t registry-vibe.elivcloud.org/vibe-order/backend:<immutable-tag> \
+     ./backend
+   ```
+2. Запушить image в private Registry:
+   ```bash
+   docker push registry-vibe.elivcloud.org/vibe-order/backend:<immutable-tag>
+   ```
+3. Если релиз меняет схему БД — backup PostgreSQL, проверить файл непустым
+   (см. "Ограничение: развертывание базы данных" ниже), не продолжать без
+   этого подтверждения.
+4. На VPS: `git pull`/`git fetch` — обновить репозиторий (docs/compose/nginx
+   config), и `docker compose config --quiet` — убедиться, что `.env`
+   полон и конфигурация валидна, до запуска чего-либо.
+5. На VPS: `docker pull registry-vibe.elivcloud.org/vibe-order/backend:<immutable-tag>`
+   — скачать готовый image, **без** `docker compose build`.
+6. Сохранить текущий работающий image под rollback-тегом (например,
+   `docker tag <текущий backend image> vibe-order-infra-backend:rollback-<дата>`)
+   — до пересоздания контейнера, чтобы откат был мгновенным (`docker tag` +
+   `docker compose up -d backend`) без повторного pull/build.
+7. Переключить локальный тег, который ожидает Compose-декларация
+   (`build: ./backend` → образ `vibe-order-infra-backend`), на только что
+   запушенный/выкачанный release image (`docker tag
+   registry-vibe.elivcloud.org/vibe-order/backend:<immutable-tag>
+   vibe-order-infra-backend:latest`), чтобы `docker compose up -d backend`
+   использовал его, а не запускал build.
+8. Пересоздать **только** backend: `docker compose up -d backend` (Compose
+   дождется `postgres` healthy благодаря `depends_on`; остальные сервисы —
+   `nginx`, `postgres`, `registry`, `watchtower`, `pgadmin` — не
+   перезапускаются этим шагом). Если релиз меняет схему БД, при старте
+   backend вызовет `Base.metadata.create_all()` — создаст отсутствующие
+   таблицы, существующие таблицы/данные не затрагивает.
+
+**Frontend (собран вне VPS, см. "Production build frontend" выше):**
+
+9. Собрать `frontend/dist` на build-машине, передать на VPS как
+   версионированный artifact с SHA-256 контрольной суммой, опубликовать
+   hashed assets без удаления старых, затем атомарно заменить `index.html`
+   — полная процедура и обоснование порядка — см. "Production build
+   frontend" выше.
+
+**Nginx (только если конфигурация меняется в этом релизе):**
+
+10. `nginx -t` **обязательно ДО** применения новой конфигурации — не после
+    и не одновременно с ней.
+11. Если `nginx -t` прошел — применить **только graceful reload**, без
+    recreate контейнера: `docker compose exec nginx nginx -s reload` (или
+    `docker compose kill -s HUP nginx`). Пересоздание/restart контейнера
+    Nginx для смены конфигурации не требуется и не выполняется.
+12. Если `nginx -t` НЕ прошел — не применять reload, откатить
+    `nginx/conf.d/*.conf` до валидного состояния.
+
+**После обновления любого компонента:**
+
+13. Smoke tests — см. "Production smoke checklist" ниже (публикация `/admin`,
+    protected API без токена → `401`, `/docs`/`/openapi.json`/`/redoc`
+    снаружи недоступны и т.д.).
+14. `docker compose ps` — все сервисы в статусе `running`/`healthy`.
+15. `docker stats --no-stream` — сверить фактическое потребление
+    памяти/CPU с лимитами (см. "Resource protection").
 
 `docker compose down` не используется как часть стандартного flow
 обновления — он остановил бы все сервисы разом вместо контролируемого
-поочередного обновления.
+поочередного обновления. Сборка (`docker compose build` / `npm run build`
+напрямую на хосте) на самом VPS не рекомендуется в принципе — на VPS с
+RAM около 1 GB build-процесс (особенно TypeScript/Vite или Python wheel
+compilation) конкурирует за память с работающими сервисами и рискует
+уронить их по OOM.
 
 ## Ограничение: развертывание базы данных (Alembic отсутствует)
 
@@ -666,9 +755,12 @@ docker run --rm -v "$PWD/frontend:/app" -w /app node:22-slim sh -c "npm ci && np
   была создана недостающая таблица `admins` — остальные таблицы
   (`applications`, `behavior_metrics`, `admin_settings`) и их данные
   остались нетронутыми.
-- Тем не менее, **перед обновлением production обязателен backup
-  PostgreSQL** — `create_all()` осознанно принят для текущего учебного этапа
-  именно при этом условии, а не как замена миграциям в общем случае.
+- Тем не менее, **перед каждым обновлением production, меняющим схему БД,
+  обязателен backup PostgreSQL** — `create_all()` осознанно принят для
+  текущего учебного этапа именно при этом условии, а не как замена
+  миграциям в общем случае. Это правило действует для любого будущего
+  релиза со схемными изменениями, а не только для того релиза, что впервые
+  добавил таблицу `admins`.
 - Для полноценного production-grade развития схемы БД в дальнейшем
   запланирован переход на Alembic (см. "Дальше по плану").
 
@@ -681,7 +773,7 @@ Backup — вне репозитория, с конкретным именем �
 backup_dir="$HOME/vibe-order-infra-backups"
 install -d -m 700 "$backup_dir"
 
-backup_file="$backup_dir/backup-before-admin-analytics-$(date +%Y%m%d-%H%M%S).sql"
+backup_file="$backup_dir/backup-before-<release-tag>-$(date +%Y%m%d-%H%M%S).sql"
 
 docker compose exec -T postgres sh -c \
   'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' \
@@ -719,9 +811,13 @@ ls -lh "$backup_file"
    `admin_exists: false`), страница покажет форму регистрации первого
    администратора — заполнить имя пользователя и пароль.
 3. После успешной регистрации (`POST /api/auth/register`) endpoint
-   регистрации перестает разрешать создание следующего первого admin —
-   повторный `POST /api/auth/register` вернет `409 Conflict` независимо от
-   переданных данных.
+   регистрации перестает разрешать создание следующего первого admin — по
+   backend-контракту (проверено automated backend test suite) повторный
+   `POST /api/auth/register` вернет `409 Conflict` независимо от переданных
+   данных. В production это закрытие подтверждено без повторного вызова
+   самого `POST /api/auth/register` — через `GET /api/auth/check`, который
+   возвращает `registration_allowed: false` (см. "Ручная end-to-end
+   приемка" ниже).
 4. Все последующие входы — через `POST /api/auth/login` (форма входа на
    `/admin`), пароли хранятся в виде Argon2id-хэша.
 
@@ -736,9 +832,12 @@ ls -lh "$backup_file"
 поведенческой аналитики:
 
 - Регистрация первого администратора (`POST /api/auth/register`) —
-  успешна; endpoint регистрации закрылся сразу после нее
-  (`GET /api/auth/check` → `admin_exists: true`, `registration_allowed:
-  false`, повторный `POST /api/auth/register` → `409 Conflict`).
+  успешна; endpoint регистрации закрылся сразу после нее — в production
+  это подтверждено через `GET /api/auth/check` →
+  `admin_exists: true`, `registration_allowed: false` (повторный
+  `POST /api/auth/register` вручную в production не выполнялся; что он
+  возвращает `409 Conflict` — подтверждено automated backend test suite,
+  а не ручным вызовом на проде, см. "First production admin" выше).
 - Повторные login/logout проверены: logout очищает JWT из
   `sessionStorage`, повторный login снова открывает панель.
 - Публичный frontend доступен по HTTPS; `/admin` (административная панель)
@@ -835,10 +934,12 @@ smoke-test этой функциональности на VPS.
 - [x] Административная авторизация — полный цикл:
       - [x] регистрация первого администратора (`POST /api/auth/register`)
         прошла успешно;
-      - [x] повторная регистрация первого admin получает ожидаемый отказ
-        (`409 Conflict`, а не повторное создание) — подтверждено также
-        текущим состоянием `GET /api/auth/check` →
-        `registration_allowed: false`;
+      - [x] закрытие регистрации первого admin подтверждено в production
+        через `GET /api/auth/check` → `registration_allowed: false` (без
+        повторного ручного вызова `POST /api/auth/register` на проде); что
+        сам повторный вызов вернул бы `409 Conflict`, а не повторное
+        создание, — часть backend-контракта, подтвержденная automated test
+        suite, а не production smoke-test'ом;
       - [x] logout (кнопка "Выйти" в `/admin`) очищает JWT из
         `sessionStorage` и возвращает UI на экран входа;
       - [x] повторный login (`POST /api/auth/login`) после logout снова
@@ -1091,7 +1192,18 @@ json-file` с `max-size: "10m"`, `max-file: "3"` — до ~30MB логов на
 | registry | `registry:3.1.1` |
 | nginx | `nginx:1.30.4-alpine` |
 | watchtower | `nickfedor/watchtower:1.19.0` |
-| backend | собственная сборка на базе `python:3.12-slim` (`build: ./backend`, не тянется из реестра) |
+| backend | собственная сборка на базе `python:3.12-slim` |
+
+Для `backend` — две разные, не противоречащие друг другу вещи:
+
+- **Compose declaration** (`docker-compose.yml`): `build: ./backend` — build
+  context для локальной разработки и для самого первого bootstrap.
+- **Production delivery**: текущий production release доставлен не через
+  локальный `docker compose build` на VPS, а через private Registry —
+  release image собран вне VPS для `linux/amd64` и запушен с immutable tag
+  в `registry-vibe.elivcloud.org`, на VPS выполнен `docker pull` этого
+  image (см. "Порядок деплоя" ниже — этот же принцип применяется к каждому
+  будущему релизу backend, не только к текущему).
 
 Совместимость Watchtower-форка и Registry v3.1.1 с текущей конфигурацией
 проверена по официальной документации (см. раздел "Почему так") перед
