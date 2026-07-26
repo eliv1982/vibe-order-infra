@@ -677,12 +677,12 @@ Backup PostgreSQL перед обновлением обязателен тол�
    `:latest`):
    ```bash
    docker buildx build --platform linux/amd64 \
-     -t registry-vibe.elivcloud.org/vibe-order/backend:<immutable-tag> \
+     -t registry-vibe.elivcloud.org/vibe-order-infra/backend:<immutable-tag> \
      ./backend
    ```
 2. Запушить image в private Registry:
    ```bash
-   docker push registry-vibe.elivcloud.org/vibe-order/backend:<immutable-tag>
+   docker push registry-vibe.elivcloud.org/vibe-order-infra/backend:<immutable-tag>
    ```
 3. Если релиз меняет схему БД — backup PostgreSQL, проверить файл непустым
    (см. "Ограничение: развертывание базы данных" ниже), не продолжать без
@@ -690,24 +690,33 @@ Backup PostgreSQL перед обновлением обязателен тол�
 4. На VPS: `git pull`/`git fetch` — обновить репозиторий (docs/compose/nginx
    config), и `docker compose config --quiet` — убедиться, что `.env`
    полон и конфигурация валидна, до запуска чего-либо.
-5. На VPS: `docker pull registry-vibe.elivcloud.org/vibe-order/backend:<immutable-tag>`
+5. На VPS: `docker pull registry-vibe.elivcloud.org/vibe-order-infra/backend:<immutable-tag>`
    — скачать готовый image, **без** `docker compose build`.
 6. Сохранить текущий работающий image под rollback-тегом (например,
    `docker tag <текущий backend image> vibe-order-infra-backend:rollback-<дата>`)
    — до пересоздания контейнера, чтобы откат был мгновенным (`docker tag` +
-   `docker compose up -d backend`) без повторного pull/build.
+   `docker compose up -d --no-build --no-deps backend`) без повторного
+   pull/build.
 7. Переключить локальный тег, который ожидает Compose-декларация
    (`build: ./backend` → образ `vibe-order-infra-backend`), на только что
    запушенный/выкачанный release image (`docker tag
-   registry-vibe.elivcloud.org/vibe-order/backend:<immutable-tag>
-   vibe-order-infra-backend:latest`), чтобы `docker compose up -d backend`
-   использовал его, а не запускал build.
-8. Пересоздать **только** backend: `docker compose up -d backend` (Compose
-   дождется `postgres` healthy благодаря `depends_on`; остальные сервисы —
-   `nginx`, `postgres`, `registry`, `watchtower`, `pgadmin` — не
-   перезапускаются этим шагом). Если релиз меняет схему БД, при старте
-   backend вызовет `Base.metadata.create_all()` — создаст отсутствующие
-   таблицы, существующие таблицы/данные не затрагивает.
+   registry-vibe.elivcloud.org/vibe-order-infra/backend:<immutable-tag>
+   vibe-order-infra-backend:latest`), чтобы `docker compose up -d --no-build
+   --no-deps backend` использовал его, а не запускал build.
+8. Пересоздать **только** backend:
+   ```bash
+   docker compose up -d --no-build --no-deps backend
+   ```
+   `--no-build` запрещает Compose собирать образ на VPS даже при наличии
+   `build: ./backend` в декларации — используется только уже загруженный
+   через `docker pull`/`docker tag` image. `--no-deps` не поднимает и не
+   затрагивает зависимости backend (`postgres` из `depends_on`) — Compose
+   не проверяет и не трогает healthcheck `postgres`, а просто пересоздает
+   контейнер backend на уже работающей БД. Пересоздается только backend;
+   остальные сервисы — `nginx`, `postgres`, `registry`, `watchtower`,
+   `pgadmin` — не перезапускаются этим шагом. Если релиз меняет схему БД,
+   при старте backend вызовет `Base.metadata.create_all()` — создаст
+   отсутствующие таблицы, существующие таблицы/данные не затрагивает.
 
 **Frontend (собран вне VPS, см. "Production build frontend" выше):**
 
