@@ -22,6 +22,11 @@ def _create_application(client, **overrides) -> int:
     return client.post("/api/applications", json=_application_payload(**overrides)).json()["id"]
 
 
+def _create_application_with_capability(client, **overrides) -> tuple[int, str]:
+    body = client.post("/api/applications", json=_application_payload(**overrides)).json()
+    return body["id"], body["behavior_metrics_capability"]
+
+
 # --- auth and existence -------------------------------------------------
 
 
@@ -67,11 +72,12 @@ def test_detail_application_without_metrics_returns_empty_shape(client, admin_au
 
 
 def test_detail_single_metric(client, admin_auth_headers):
-    application_id = _create_application(client)
+    application_id, capability = _create_application_with_capability(client)
     client.post(
         "/api/behavior-metrics",
         json={
             "application_id": application_id,
+            "capability": capability,
             "time_on_page": 42,
             "return_count": 3,
             "clicked_buttons": [{"button": "cta", "count": 2}],
@@ -100,24 +106,38 @@ def test_second_metric_for_same_application_is_rejected_by_unique_constraint(cli
     aggregation is unit-tested against the pure service directly
     (test_behavior_analytics_service.py::test_detail_multiple_metrics_are_summed_deterministically)
     rather than exercised here: the DB schema makes it unreachable through
-    the public API, and this test locks in exactly why."""
-    application_id = _create_application(client)
-    first = client.post("/api/behavior-metrics", json={"application_id": application_id})
+    the public API, and this test locks in exactly why.
+
+    The second attempt gets 403, not 409: its capability was already
+    consumed by the first submission, so it fails the same single neutral
+    invalid-capability check every other invalid-capability case fails (see
+    routes/behavior_metrics.py and tests/test_behavior_metrics_capability.py)
+    - "this application already has metrics" no longer gets its own,
+    distinguishable response."""
+    application_id, capability = _create_application_with_capability(client)
+    first = client.post(
+        "/api/behavior-metrics",
+        json={"application_id": application_id, "capability": capability},
+    )
     assert first.status_code == 201
 
-    second = client.post("/api/behavior-metrics", json={"application_id": application_id})
-    assert second.status_code == 409
+    second = client.post(
+        "/api/behavior-metrics",
+        json={"application_id": application_id, "capability": capability},
+    )
+    assert second.status_code == 403
 
 
 # --- malformed JSON --------------------------------------------------------
 
 
 def test_detail_malformed_json_does_not_500(client, admin_auth_headers):
-    application_id = _create_application(client)
+    application_id, capability = _create_application_with_capability(client)
     create_resp = client.post(
         "/api/behavior-metrics",
         json={
             "application_id": application_id,
+            "capability": capability,
             "clicked_buttons": [{"button": "x"}, 123, None, {"count": 5}],
             "cursor_hover_data": {"hero": "not-a-dict", "": {"hovers": 1, "ms": 1}},
         },
@@ -154,9 +174,10 @@ def test_detail_does_not_leak_contact_data_or_full_application(client, admin_aut
 def test_behavior_metrics_crud_contract_is_unchanged(client, admin_auth_headers):
     """Guard against accidentally changing the pre-existing behavior-metrics
     CRUD contract while adding the new analytics routes."""
-    application_id = _create_application(client)
+    application_id, capability = _create_application_with_capability(client)
     create_resp = client.post(
-        "/api/behavior-metrics", json={"application_id": application_id, "time_on_page": 5}
+        "/api/behavior-metrics",
+        json={"application_id": application_id, "capability": capability, "time_on_page": 5},
     )
     assert create_resp.status_code == 201
     metric_id = create_resp.json()["id"]

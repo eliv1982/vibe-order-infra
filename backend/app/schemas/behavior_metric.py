@@ -20,7 +20,23 @@ class BehaviorMetricBase(BaseModel):
 
 
 class BehaviorMetricCreate(BehaviorMetricBase):
-    pass
+    # The one-time token returned as behavior_metrics_capability from
+    # POST /applications (see app/schemas/application.py::ApplicationCreateRead).
+    # Write-only - deliberately absent from BehaviorMetricBase/
+    # BehaviorMetricRead, so it is never echoed back in any response. See
+    # app/crud/application_behavior_capability.py for how it's verified.
+    #
+    # Optional/nullable (not `Field(...)`) *on purpose*, even though a real
+    # submission always needs one: this lets the route
+    # (routes/behavior_metrics.py) fold a missing/omitted/empty capability
+    # into the exact same "no valid capability" outcome as a wrong one,
+    # instead of a distinct 422 that would otherwise be reachable without
+    # ever touching application_id - part of the single neutral
+    # invalid-capability contract that endpoint enforces. A non-string
+    # value (int/list/object) still fails ordinary schema validation (422),
+    # since that rejection depends only on the field's shape, never on
+    # whether the referenced application/capability exists.
+    capability: str | None = Field(None, max_length=256)
 
 
 class BehaviorMetricUpdate(BaseModel):

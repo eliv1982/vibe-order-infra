@@ -103,11 +103,15 @@ export function finalizeActiveHovers(state: Map<string, HoverEntry>, now: number
   }
 }
 
-export function buildBehaviorMetricPayload(applicationId: number): BehaviorMetricCreatePayload {
+export function buildBehaviorMetricPayload(
+  applicationId: number,
+  capability: string,
+): BehaviorMetricCreatePayload {
   finalizeActiveHovers(hoverState);
   const timeOnPageSeconds = Math.max(0, Math.round((Date.now() - pageLoadedAt) / 1000));
   return {
     application_id: applicationId,
+    capability,
     time_on_page: timeOnPageSeconds,
     clicked_buttons: summarizeClicks(clickCounts),
     cursor_hover_data: summarizeHovers(hoverState),

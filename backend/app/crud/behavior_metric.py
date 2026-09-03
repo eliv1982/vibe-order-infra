@@ -12,7 +12,11 @@ from app.schemas.behavior_metric import BehaviorMetricCreate, BehaviorMetricUpda
 
 
 def create_behavior_metric(db: Session, data: BehaviorMetricCreate) -> BehaviorMetric:
-    metric = BehaviorMetric(**data.model_dump())
+    # capability is a write-only field with no matching column on
+    # BehaviorMetric (see schemas/behavior_metric.py) - it must already have
+    # been verified/consumed by the caller (routes/behavior_metrics.py)
+    # before this is ever called.
+    metric = BehaviorMetric(**data.model_dump(exclude={"capability"}))
     db.add(metric)
     try:
         db.commit()

@@ -10,7 +10,12 @@ from app.core.deps import get_current_admin
 from app.core.exceptions import ConflictError
 from app.crud import application as crud
 from app.models.application import Application
-from app.schemas.application import ApplicationCreate, ApplicationRead, ApplicationUpdate
+from app.schemas.application import (
+    ApplicationCreate,
+    ApplicationCreateRead,
+    ApplicationRead,
+    ApplicationUpdate,
+)
 from app.schemas.application_analysis import (
     ApplicationPriorityRead,
     PrioritizedApplicationList,
@@ -64,13 +69,22 @@ def _to_priority_read(application: Application, score: ApplicationScore) -> Appl
     )
 
 
-@router.post("", response_model=ApplicationRead, status_code=status.HTTP_201_CREATED)
-def create_application(payload: ApplicationCreate, db: Session = Depends(get_db)) -> ApplicationRead:
+@router.post("", response_model=ApplicationCreateRead, status_code=status.HTTP_201_CREATED)
+def create_application(
+    payload: ApplicationCreate, db: Session = Depends(get_db)
+) -> ApplicationCreateRead:
     # Public: this is the client-facing application form's submit endpoint.
+    # The response includes a one-time behavior_metrics_capability the
+    # client needs to submit behavior metrics for this application (see
+    # POST /behavior-metrics) - this is the only time it is ever returned.
     try:
-        return crud.create_application(db, payload)
+        application, capability_token = crud.create_application(db, payload)
     except ConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return ApplicationCreateRead(
+        **ApplicationRead.model_validate(application).model_dump(),
+        behavior_metrics_capability=capability_token,
+    )
 
 
 @router.get("", response_model=list[ApplicationRead], dependencies=[Depends(get_current_admin)])

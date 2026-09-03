@@ -572,7 +572,7 @@ async function handleSubmit(
     bannerEl.innerHTML =
       '<div class="banner banner--success">Заявка отправлена! Мы свяжемся с вами в ближайшее время.</div>';
 
-    void sendBehaviorMetrics(application.id);
+    void sendBehaviorMetrics(application.id, application.behavior_metrics_capability);
   } catch (error) {
     const message =
       error instanceof ApiError ? error.message : 'Не удалось отправить заявку. Попробуйте ещё раз.';
@@ -582,12 +582,16 @@ async function handleSubmit(
   }
 }
 
-async function sendBehaviorMetrics(applicationId: number): Promise<void> {
+async function sendBehaviorMetrics(applicationId: number, capability: string): Promise<void> {
   try {
-    await api.createBehaviorMetric(buildBehaviorMetricPayload(applicationId));
+    await api.createBehaviorMetric(buildBehaviorMetricPayload(applicationId, capability));
   } catch (error) {
     // Metrics are best-effort: a failure here must never affect the
     // already-successful Application — surface it only for developers.
+    // Never log `error` verbatim if it could echo the capability back
+    // (it can't today - ApiError.message is server-supplied error text,
+    // never the request payload - but this stays deliberate rather than
+    // incidental).
     console.warn('Failed to save behavior metrics', error);
   }
 }

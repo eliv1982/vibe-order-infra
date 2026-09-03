@@ -85,6 +85,18 @@ export interface ApplicationRead {
   updated_at: string;
 }
 
+/**
+ * POST /applications' response only - ApplicationRead plus a one-time
+ * capability token the client needs to submit behavior metrics for this
+ * application (see backend/app/schemas/application.py::ApplicationCreateRead
+ * and backend/app/crud/application_behavior_capability.py). Never returned
+ * by GET/PATCH - the raw token isn't stored server-side, so there would be
+ * nothing to return even if they tried.
+ */
+export interface ApplicationCreateRead extends ApplicationRead {
+  behavior_metrics_capability: string;
+}
+
 // --- backend/app/schemas/application_analysis.py ---
 
 export interface ScoringReason {
@@ -117,6 +129,12 @@ export interface PrioritizedApplicationList {
 
 export interface BehaviorMetricCreatePayload {
   application_id: number;
+  // One-time token returned as behavior_metrics_capability from
+  // POST /applications (see ApplicationCreateRead above) - required,
+  // single-use, and bound to this exact application_id. Without it (or with
+  // the wrong one) the backend rejects the submission (see
+  // backend/app/routes/behavior_metrics.py).
+  capability: string;
   time_on_page?: number;
   clicked_buttons?: unknown[];
   cursor_hover_data?: Record<string, unknown>;
@@ -183,11 +201,6 @@ export interface ApplicationBehaviorAnalytics {
 
 // --- backend/app/schemas/auth.py ---
 
-export interface AdminRegisterPayload {
-  username: string;
-  password: string;
-}
-
 export interface AdminLoginPayload {
   username: string;
   password: string;
@@ -209,5 +222,4 @@ export interface TokenResponse {
 
 export interface AuthCheckResponse {
   admin_exists: boolean;
-  registration_allowed: boolean;
 }

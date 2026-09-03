@@ -28,43 +28,60 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _register(client, username="admin", password="StrongPassw0rd!"):
-    return client.post("/api/auth/register", json={"username": username, "password": password})
+def _bootstrap_admin(db_session, username="admin", password="StrongPassw0rd!") -> Admin:
+    """Create an admin directly through the domain layer - mirrors exactly
+    what the operator CLI (app/cli.py) does, since there is no public HTTP
+    registration endpoint to call instead (see app/routes/auth.py)."""
+    from app.core.security import normalize_username
+
+    return admin_crud.register_first_admin(db_session, normalize_username(username), password)
 
 
 def _login(client, username="admin", password="StrongPassw0rd!"):
     return client.post("/api/auth/login", json={"username": username, "password": password})
 
 
-def test_check_reports_no_admin_and_registration_allowed_before_registering(client):
+def test_check_reports_no_admin_before_bootstrap(client):
     response = client.get("/api/auth/check")
     assert response.status_code == 200
-    assert response.json() == {"admin_exists": False, "registration_allowed": True}
+    assert response.json() == {"admin_exists": False}
 
 
-def test_register_creates_first_admin_without_leaking_password_hash(client):
-    response = _register(client)
-    assert response.status_code == 201
-    body = response.json()
-    assert body["username"] == "admin"
-    assert body["is_active"] is True
-    assert "password_hash" not in body
-    assert "password" not in body
-
-
-def test_check_reports_admin_exists_and_registration_closed_after_registering(client):
-    _register(client)
+def test_check_response_never_advertises_a_registration_state(client):
+    """/auth/check must not expose anything like "registration_allowed" -
+    whether the first admin can be self-registered over public HTTP is no
+    longer a concept this API has at all (see AuthCheckResponse)."""
     response = client.get("/api/auth/check")
     assert response.status_code == 200
-    assert response.json() == {"admin_exists": True, "registration_allowed": False}
+    assert set(response.json().keys()) == {"admin_exists"}
 
 
-def test_second_registration_attempt_is_rejected(client):
-    first = _register(client, username="admin")
-    assert first.status_code == 201
+def test_public_register_endpoint_does_not_exist(client):
+    """The unauthenticated first-admin-creation defect is fixed by removing
+    the HTTP path entirely, not by gating it - POST /auth/register must not
+    resolve to any route, on an empty database or otherwise."""
+    response = client.post(
+        "/api/auth/register", json={"username": "attacker", "password": "StrongPassw0rd!"}
+    )
+    assert response.status_code == 404
 
-    second = _register(client, username="someone-else")
-    assert second.status_code == 409
+
+def test_public_register_cannot_create_the_first_admin_on_an_empty_db(client, db_session):
+    """End-to-end proof of the fix: an empty database stays unclaimable over
+    public HTTP - POST /auth/register (whether or not it exists as a route)
+    can never result in an admin row."""
+    response = client.post(
+        "/api/auth/register", json={"username": "attacker", "password": "StrongPassw0rd!"}
+    )
+    assert response.status_code != 201
+    assert admin_crud.count_admins(db_session) == 0
+
+
+def test_check_reports_admin_exists_after_bootstrap(client, db_session):
+    _bootstrap_admin(db_session)
+    response = client.get("/api/auth/check")
+    assert response.status_code == 200
+    assert response.json() == {"admin_exists": True}
 
 
 def test_register_first_admin_rejects_empty_username_when_called_directly(db_session):
@@ -87,9 +104,8 @@ def test_register_first_admin_rejects_whitespace_only_username_when_called_direc
     assert admin_crud.count_admins(db_session) == 0
 
 
-def test_login_success_returns_token_matching_registered_admin(client):
-    register_resp = _register(client)
-    admin_id = register_resp.json()["id"]
+def test_login_success_returns_token_matching_bootstrapped_admin(client, db_session):
+    admin = _bootstrap_admin(db_session)
 
     login_resp = _login(client, username="Admin")  # case must not matter
     assert login_resp.status_code == 200
@@ -98,11 +114,11 @@ def test_login_success_returns_token_matching_registered_admin(client):
     assert body["expires_in"] > 0
 
     payload = decode_access_token(body["access_token"])
-    assert payload["sub"] == str(admin_id)
+    assert payload["sub"] == str(admin.id)
 
 
-def test_login_with_unknown_username_and_wrong_password_return_identical_401(client):
-    _register(client)
+def test_login_with_unknown_username_and_wrong_password_return_identical_401(client, db_session):
+    _bootstrap_admin(db_session)
 
     unknown_user_resp = _login(client, username="nobody", password="whatever123")
     wrong_password_resp = _login(client, username="admin", password="definitely-wrong")
@@ -113,8 +129,7 @@ def test_login_with_unknown_username_and_wrong_password_return_identical_401(cli
 
 
 def test_login_for_inactive_admin_returns_same_neutral_401(client, db_session):
-    _register(client)
-    admin = admin_crud.get_admin_by_username(db_session, "admin")
+    admin = _bootstrap_admin(db_session)
     admin.is_active = False
     db_session.commit()
 
@@ -123,8 +138,8 @@ def test_login_for_inactive_admin_returns_same_neutral_401(client, db_session):
     assert response.json() == {"detail": "Incorrect username or password"}
 
 
-def test_me_returns_current_admin_without_password_hash(client):
-    _register(client)
+def test_me_returns_current_admin_without_password_hash(client, db_session):
+    _bootstrap_admin(db_session)
     token = _login(client).json()["access_token"]
 
     response = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
@@ -144,8 +159,8 @@ def test_me_with_malformed_token_returns_401(client):
     assert response.status_code == 401
 
 
-def test_me_with_expired_token_returns_401(client):
-    _register(client)
+def test_me_with_expired_token_returns_401(client, db_session):
+    _bootstrap_admin(db_session)
     settings = get_settings()
     now = int(time.time())
     expired_payload = {"sub": "1", "type": "access", "iat": now - 120, "exp": now - 60}
@@ -158,8 +173,8 @@ def test_me_with_expired_token_returns_401(client):
 
 
 def test_me_for_deactivated_admin_returns_401(client, db_session):
-    register_resp = _register(client)
-    admin_id = register_resp.json()["id"]
+    admin = _bootstrap_admin(db_session)
+    admin_id = admin.id
     token = _login(client).json()["access_token"]
 
     admin = admin_crud.get_admin(db_session, admin_id)

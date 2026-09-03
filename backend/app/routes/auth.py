@@ -1,37 +1,27 @@
-"""HTTP routes for admin authentication: check, register, login, me."""
+"""HTTP routes for admin authentication: check, login, me.
+
+No public registration endpoint - the first Admin can only be created by an
+operator with shell access to the backend container, via the CLI in
+app/cli.py. This is intentional (see that module's docstring): public HTTP
+traffic must never be sufficient to claim the first admin.
+"""
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_current_admin
-from app.core.exceptions import ConflictError
 from app.core.security import DUMMY_PASSWORD_HASH, create_access_token, verify_password
 from app.crud import admin as admin_crud
 from app.models.admin import Admin
-from app.schemas.auth import (
-    AdminLogin,
-    AdminRead,
-    AdminRegister,
-    AuthCheckResponse,
-    TokenResponse,
-)
+from app.schemas.auth import AdminLogin, AdminRead, AuthCheckResponse, TokenResponse
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.get("/check", response_model=AuthCheckResponse)
 def check_auth_status(db: Session = Depends(get_db)) -> AuthCheckResponse:
-    admin_exists = admin_crud.count_admins(db) > 0
-    return AuthCheckResponse(admin_exists=admin_exists, registration_allowed=not admin_exists)
-
-
-@router.post("/register", response_model=AdminRead, status_code=status.HTTP_201_CREATED)
-def register_first_admin(payload: AdminRegister, db: Session = Depends(get_db)) -> AdminRead:
-    try:
-        return admin_crud.register_first_admin(db, payload.username, payload.password)
-    except ConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return AuthCheckResponse(admin_exists=admin_crud.count_admins(db) > 0)
 
 
 @router.post("/login", response_model=TokenResponse)

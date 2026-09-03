@@ -57,12 +57,9 @@ export function renderAdmin(root: HTMLElement): void {
   void runAuthGate(root, renderId);
 }
 
-/** Pure — unit tested. Registration is only offered while no admin exists yet. */
-export function shouldOfferRegistration(check: AuthCheckResponse): boolean {
-  return !check.admin_exists && check.registration_allowed;
-}
-
 const SESSION_EXPIRED_NOTICE = 'Сессия истекла — войдите снова.';
+const NO_ADMIN_CONFIGURED_NOTICE =
+  'Администратор ещё не настроен. Обратитесь к оператору для первоначальной настройки сервера.';
 
 async function runAuthGate(root: HTMLElement, renderId: number): Promise<void> {
   root.innerHTML = loadingTemplate();
@@ -77,13 +74,13 @@ async function runAuthGate(root: HTMLElement, renderId: number): Promise<void> {
   }
   if (!isCurrentRender(renderId)) return;
 
-  if (shouldOfferRegistration(check)) {
-    renderRegisterView(root, renderId);
-    return;
-  }
-
+  // There is no public self-registration flow, by design: the first admin
+  // can only be created by an operator with shell access to the backend
+  // container (see backend/app/cli.py). An empty database still shows the
+  // ordinary login form here — logging in simply fails until that bootstrap
+  // has run — with an explanatory notice instead of an actionable form.
   if (!getToken()) {
-    renderLoginView(root, renderId);
+    renderLoginView(root, renderId, check.admin_exists ? undefined : NO_ADMIN_CONFIGURED_NOTICE);
     return;
   }
 
@@ -159,160 +156,6 @@ function renderAuthCheckError(root: HTMLElement, renderId: number): void {
 
 function noticeBannerHtml(notice: string | undefined): string {
   return notice ? `<div class="banner banner--notice">${escapeHtml(notice)}</div>` : '';
-}
-
-function registerTemplate(notice?: string): string {
-  return `
-    <div class="page container admin-page admin-auth-page">
-      ${pageHeaderTemplate()}
-      <div class="card form-card admin-auth-card">
-        <span class="eyebrow">Первый запуск</span>
-        <h2>Создайте учётную запись администратора</h2>
-        <div id="auth-banner" role="status" aria-live="polite">${noticeBannerHtml(notice)}</div>
-        <form id="register-form" novalidate>
-          <div class="field">
-            <label for="register-username">Имя пользователя</label>
-            <input
-              type="text"
-              id="register-username"
-              name="username"
-              required
-              minlength="3"
-              maxlength="150"
-              autocomplete="username"
-            />
-          </div>
-          <div class="field">
-            <label for="register-password">Пароль</label>
-            <input
-              type="password"
-              id="register-password"
-              name="password"
-              required
-              minlength="8"
-              maxlength="256"
-              autocomplete="new-password"
-            />
-          </div>
-          <div class="field">
-            <label for="register-password-confirm">Повторите пароль</label>
-            <input
-              type="password"
-              id="register-password-confirm"
-              name="password_confirm"
-              required
-              minlength="8"
-              maxlength="256"
-              autocomplete="new-password"
-            />
-          </div>
-          <button class="btn btn-primary" type="submit" id="register-submit">
-            Зарегистрироваться
-          </button>
-        </form>
-      </div>
-    </div>
-  `;
-}
-
-function renderRegisterView(root: HTMLElement, renderId: number, notice?: string): void {
-  if (!isCurrentRender(renderId)) return;
-  root.innerHTML = registerTemplate(notice);
-  wireRegisterForm(root, renderId);
-}
-
-function wireRegisterForm(root: HTMLElement, renderId: number): void {
-  const form = root.querySelector<HTMLFormElement>('#register-form');
-  const submitBtn = root.querySelector<HTMLButtonElement>('#register-submit');
-  const bannerEl = root.querySelector<HTMLElement>('#auth-banner');
-  if (!form || !submitBtn || !bannerEl) return;
-
-  let inFlight = false;
-
-  form.addEventListener('submit', (event) => {
-    event.preventDefault();
-    if (!isCurrentRender(renderId) || inFlight) return;
-    inFlight = true;
-    void handleRegister(root, renderId, form, submitBtn, bannerEl).finally(() => {
-      inFlight = false;
-    });
-  });
-}
-
-/** Mirrors syncBudgetRangeValidity's pattern: a native custom-validity check
- * run right before form.reportValidity(), not on every keystroke. */
-function syncPasswordConfirmValidity(form: HTMLFormElement): void {
-  const passwordInput = form.querySelector<HTMLInputElement>('[name="password"]');
-  const confirmInput = form.querySelector<HTMLInputElement>('[name="password_confirm"]');
-  if (!passwordInput || !confirmInput) return;
-
-  confirmInput.setCustomValidity(
-    passwordInput.value === confirmInput.value ? '' : 'Пароли не совпадают.',
-  );
-}
-
-async function handleRegister(
-  root: HTMLElement,
-  renderId: number,
-  form: HTMLFormElement,
-  submitBtn: HTMLButtonElement,
-  bannerEl: HTMLElement,
-): Promise<void> {
-  bannerEl.innerHTML = '';
-
-  syncPasswordConfirmValidity(form);
-  if (!form.reportValidity()) return;
-
-  const formData = new FormData(form);
-  // Username: trimmed (consistent with the backend's own normalization) but
-  // never lowercased here — the backend case-folds for storage/comparison.
-  const username = String(formData.get('username') ?? '').trim();
-  // Password: never trimmed, anywhere in this pipeline.
-  const password = String(formData.get('password') ?? '');
-
-  submitBtn.disabled = true;
-  submitBtn.textContent = 'Создаём…';
-
-  try {
-    await api.registerAdmin({ username, password });
-  } catch (error) {
-    if (!isCurrentRender(renderId)) return;
-    if (error instanceof ApiError && error.status === 409) {
-      // Someone else already registered (race) — re-check canonical state
-      // per the required flow, then always land on the login view.
-      try {
-        await api.checkAuthStatus();
-      } catch {
-        // Ignore — we're going to the login view regardless of this result.
-      }
-      if (!isCurrentRender(renderId)) return;
-      renderLoginView(root, renderId, 'Администратор уже зарегистрирован. Пожалуйста, войдите.');
-      return;
-    }
-
-    const message =
-      error instanceof ApiError ? error.message : 'Не удалось создать администратора.';
-    bannerEl.innerHTML = `<div class="banner banner--error">${escapeHtml(message)}</div>`;
-    submitBtn.disabled = false;
-    submitBtn.textContent = 'Зарегистрироваться';
-    return;
-  }
-  if (!isCurrentRender(renderId)) return;
-
-  // Auto-login with the credentials just submitted (still only in memory),
-  // then verify via /me before showing the panel — simpler and more
-  // reliable than asking the admin to retype everything on a second screen.
-  try {
-    const tokenResponse = await api.loginAdmin({ username, password });
-    if (!isCurrentRender(renderId)) return;
-    saveToken(tokenResponse.access_token);
-    const admin = await api.getCurrentAdmin();
-    if (!isCurrentRender(renderId)) return;
-    renderAuthenticatedView(root, renderId, admin);
-  } catch {
-    if (!isCurrentRender(renderId)) return;
-    renderLoginView(root, renderId, 'Регистрация прошла успешно — войдите, используя указанные данные.');
-  }
 }
 
 const LOGIN_NEUTRAL_ERROR = 'Неверное имя пользователя или пароль.';

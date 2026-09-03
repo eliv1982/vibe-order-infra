@@ -44,6 +44,15 @@ def _application_payload(**overrides) -> dict:
     return payload
 
 
+def _create_application(client, **overrides) -> dict:
+    """POST /applications and return the full response body, including the
+    one-time behavior_metrics_capability - see
+    app/schemas/application.py::ApplicationCreateRead."""
+    response = client.post("/api/applications", json=_application_payload(**overrides))
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
 def test_application_crud_roundtrip(client, admin_auth_headers):
     # Creating an application is public (client form); everything else here
     # is protected and needs the admin token.
@@ -83,31 +92,51 @@ def test_application_patch_rejects_explicit_null_for_not_null_field(client, admi
     assert response.status_code == 422
 
 
-def test_behavior_metric_duplicate_returns_409(client):
-    application_id = client.post("/api/applications", json=_application_payload()).json()["id"]
+def test_behavior_metric_duplicate_returns_403_not_409(client):
+    """A second submission for an application that already has metrics does
+    NOT get a distinct 409 - the capability is already consumed by the
+    first, successful submission, so it fails the same single neutral
+    invalid-capability check (403) as any other invalid capability. See
+    tests/test_behavior_metrics_capability.py for the full "one neutral
+    response for every invalid-capability reason" contract, including a
+    direct proof that this case's body is byte-identical to every other one.
+    """
+    application = _create_application(client)
+    application_id = application["id"]
+    capability = application["behavior_metrics_capability"]
 
     first = client.post(
-        "/api/behavior-metrics", json={"application_id": application_id, "time_on_page": 30}
+        "/api/behavior-metrics",
+        json={"application_id": application_id, "capability": capability, "time_on_page": 30},
     )
     assert first.status_code == 201
 
     duplicate = client.post(
-        "/api/behavior-metrics", json={"application_id": application_id, "time_on_page": 60}
+        "/api/behavior-metrics",
+        json={"application_id": application_id, "capability": capability, "time_on_page": 60},
     )
-    assert duplicate.status_code == 409
+    assert duplicate.status_code == 403
 
 
-def test_behavior_metric_for_missing_application_returns_404(client):
+def test_behavior_metric_for_missing_application_returns_neutral_403(client):
+    """A nonexistent application_id must not get a distinct 404 - see the
+    module-level comment on this: revealing "this id doesn't exist" via a
+    different status than "wrong capability" is exactly the oracle Stage 1A
+    correction 2 removes."""
     response = client.post(
-        "/api/behavior-metrics", json={"application_id": 999999, "time_on_page": 10}
+        "/api/behavior-metrics",
+        json={"application_id": 999999, "capability": "does-not-matter", "time_on_page": 10},
     )
-    assert response.status_code == 404
+    assert response.status_code == 403
 
 
 def test_deleting_application_cascades_to_behavior_metric(client, admin_auth_headers):
-    application_id = client.post("/api/applications", json=_application_payload()).json()["id"]
+    application = _create_application(client)
+    application_id = application["id"]
+    capability = application["behavior_metrics_capability"]
     metric_id = client.post(
-        "/api/behavior-metrics", json={"application_id": application_id, "time_on_page": 15}
+        "/api/behavior-metrics",
+        json={"application_id": application_id, "capability": capability, "time_on_page": 15},
     ).json()["id"]
 
     delete_resp = client.delete(f"/api/applications/{application_id}", headers=admin_auth_headers)

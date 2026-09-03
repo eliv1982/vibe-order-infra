@@ -17,6 +17,8 @@ from app.core.security import (
     TokenError,
     create_access_token,
     decode_access_token,
+    generate_capability_token,
+    hash_capability_token,
     hash_password,
     normalize_username,
     verify_password,
@@ -225,3 +227,29 @@ def test_settings_rejects_negative_access_token_expire_minutes(monkeypatch):
     monkeypatch.setenv("ACCESS_TOKEN_EXPIRE_MINUTES", "-5")
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_generate_capability_token_is_long_and_unique():
+    first = generate_capability_token()
+    second = generate_capability_token()
+    assert first != second
+    assert len(first) >= 32
+    assert len(second) >= 32
+
+
+def test_hash_capability_token_is_deterministic_and_hex():
+    token = generate_capability_token()
+    first_hash = hash_capability_token(token)
+    second_hash = hash_capability_token(token)
+    assert first_hash == second_hash
+    assert len(first_hash) == 64  # SHA-256 hex digest
+    assert all(c in "0123456789abcdef" for c in first_hash)
+
+
+def test_hash_capability_token_differs_for_different_tokens():
+    assert hash_capability_token("token-a") != hash_capability_token("token-b")
+
+
+def test_hash_capability_token_never_equals_the_raw_token():
+    token = generate_capability_token()
+    assert hash_capability_token(token) != token

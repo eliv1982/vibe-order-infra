@@ -106,24 +106,29 @@ def client(db_session):
 
 
 @pytest.fixture()
-def admin_auth_headers(client) -> dict[str, str]:
-    """Bearer auth headers for a freshly registered, active admin.
+def admin_auth_headers(client, db_session) -> dict[str, str]:
+    """Bearer auth headers for a freshly bootstrapped, active admin.
+
+    There is no public HTTP registration endpoint (see app/routes/auth.py
+    and app/cli.py) - the only way to create an admin is directly through
+    the domain layer, exactly like the operator CLI does, so that's what
+    this fixture does too: it calls admin_crud.register_first_admin()
+    against the same db_session the overridden `client` fixture uses,
+    rather than going through HTTP. Login (still a public HTTP endpoint)
+    is unaffected and exercised for real below.
 
     Each test's db_session is its own isolated, rolled-back-at-teardown
-    transaction (see db_session above), so registering a fixed
+    transaction (see db_session above), so bootstrapping a fixed
     username/password here can never collide with or leak into any other
     test, regardless of run order.
     """
+    from app.crud import admin as admin_crud
+    from app.core.security import normalize_username
+
     username = "admin"
     password = "StrongPassw0rd!123"
 
-    register_response = client.post(
-        "/api/auth/register", json={"username": username, "password": password}
-    )
-    assert register_response.status_code == 201, (
-        f"admin registration failed with status {register_response.status_code}: "
-        f"{register_response.text}"
-    )
+    admin_crud.register_first_admin(db_session, normalize_username(username), password)
 
     login_response = client.post(
         "/api/auth/login", json={"username": username, "password": password}

@@ -102,14 +102,14 @@ describe('initBehaviorTracking (session reset)', () => {
     trackClick('hero_cta');
     trackHoverStart('services');
 
-    const beforeReset = buildBehaviorMetricPayload(1);
+    const beforeReset = buildBehaviorMetricPayload(1, 'test-capability');
     expect(beforeReset.clicked_buttons).toEqual([{ button: 'hero_cta', count: 2 }]);
 
     // Simulates SPA navigation home -> admin -> home: renderHome() calls
     // initBehaviorTracking() again on every mount.
     initBehaviorTracking(createMemoryStorage());
 
-    const afterReset = buildBehaviorMetricPayload(2);
+    const afterReset = buildBehaviorMetricPayload(2, 'test-capability');
     expect(afterReset.clicked_buttons).toEqual([]);
     expect(afterReset.cursor_hover_data).toEqual({});
   });
@@ -117,12 +117,21 @@ describe('initBehaviorTracking (session reset)', () => {
   it('does not reset return_count — it is a separate long-lived localStorage metric', () => {
     const storage = createMemoryStorage();
     initBehaviorTracking(storage);
-    const first = buildBehaviorMetricPayload(1).return_count;
+    const first = buildBehaviorMetricPayload(1, 'test-capability').return_count;
 
     initBehaviorTracking(storage);
-    const second = buildBehaviorMetricPayload(2).return_count;
+    const second = buildBehaviorMetricPayload(2, 'test-capability').return_count;
 
     expect(second).toBe((first ?? 0) + 1);
+  });
+});
+
+describe('buildBehaviorMetricPayload + capability', () => {
+  it('includes the given application_id and capability verbatim', () => {
+    initBehaviorTracking(createMemoryStorage());
+    const payload = buildBehaviorMetricPayload(7, 'one-time-token-abc');
+    expect(payload.application_id).toBe(7);
+    expect(payload.capability).toBe('one-time-token-abc');
   });
 });
 
@@ -131,7 +140,7 @@ describe('buildBehaviorMetricPayload + active hover', () => {
     initBehaviorTracking(createMemoryStorage());
     trackHoverStart('application_form');
 
-    const payload = buildBehaviorMetricPayload(42);
+    const payload = buildBehaviorMetricPayload(42, 'test-capability');
     const hoverData = payload.cursor_hover_data as Record<string, { hovers: number; ms: number }>;
 
     expect(hoverData.application_form).toBeDefined();
@@ -143,11 +152,11 @@ describe('buildBehaviorMetricPayload + active hover', () => {
     initBehaviorTracking(createMemoryStorage());
     trackHoverStart('services');
 
-    const first = buildBehaviorMetricPayload(1).cursor_hover_data as Record<
+    const first = buildBehaviorMetricPayload(1, 'test-capability').cursor_hover_data as Record<
       string,
       { hovers: number; ms: number }
     >;
-    const second = buildBehaviorMetricPayload(2).cursor_hover_data as Record<
+    const second = buildBehaviorMetricPayload(2, 'test-capability').cursor_hover_data as Record<
       string,
       { hovers: number; ms: number }
     >;

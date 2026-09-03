@@ -70,9 +70,17 @@ def test_create_application_stays_public(client):
 
 
 def test_create_behavior_metric_stays_public(client):
-    application_id = client.post("/api/applications", json=_application_payload()).json()["id"]
+    """Public means no admin token is required - it does not mean no
+    authorization at all: a valid one-time capability is still required
+    (see tests/test_behavior_metrics_capability.py for the full contract)."""
+    application = client.post("/api/applications", json=_application_payload()).json()
     response = client.post(
-        "/api/behavior-metrics", json={"application_id": application_id, "time_on_page": 5}
+        "/api/behavior-metrics",
+        json={
+            "application_id": application["id"],
+            "capability": application["behavior_metrics_capability"],
+            "time_on_page": 5,
+        },
     )
     assert response.status_code == 201
 

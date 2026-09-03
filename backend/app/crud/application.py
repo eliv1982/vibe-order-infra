@@ -7,13 +7,34 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import ConflictError
+from app.crud import application_behavior_capability as capability_crud
 from app.models.application import Application
 from app.schemas.application import ApplicationCreate, ApplicationUpdate
 
 
-def create_application(db: Session, data: ApplicationCreate) -> Application:
+def create_application(db: Session, data: ApplicationCreate) -> tuple[Application, str]:
+    """Create the Application together with its one-time behavior-metrics
+    submission capability (see app/crud/application_behavior_capability.py),
+    in a single transaction/commit - an Application can never end up
+    without exactly one capability, or vice versa.
+
+    Returns (application, raw_capability_token). The raw token exists only
+    in this return value and in the client's hands afterward - it is never
+    persisted, so the caller (routes/applications.py) must return it to the
+    client immediately; there is no way to recover it later.
+    """
     application = Application(**data.model_dump())
     db.add(application)
+    try:
+        db.flush()  # assigns application.id without ending the transaction
+    except IntegrityError as exc:
+        db.rollback()
+        raise ConflictError(
+            "Could not create application due to a data integrity conflict"
+        ) from exc
+
+    token = capability_crud.create_capability(db, application.id)
+
     try:
         db.commit()
     except IntegrityError as exc:
@@ -22,7 +43,7 @@ def create_application(db: Session, data: ApplicationCreate) -> Application:
             "Could not create application due to a data integrity conflict"
         ) from exc
     db.refresh(application)
-    return application
+    return application, token
 
 
 def get_application(db: Session, application_id: int) -> Application | None:

@@ -90,11 +90,42 @@ def test_behavior_metric_update_allows_omitting_fields():
 
 def test_behavior_metric_create_rejects_non_positive_application_id():
     with pytest.raises(ValidationError):
-        BehaviorMetricCreate(application_id=0)
+        BehaviorMetricCreate(application_id=0, capability="tok")
     with pytest.raises(ValidationError):
-        BehaviorMetricCreate(application_id=-5)
+        BehaviorMetricCreate(application_id=-5, capability="tok")
 
 
 def test_behavior_metric_create_accepts_positive_application_id():
-    metric = BehaviorMetricCreate(application_id=1)
+    metric = BehaviorMetricCreate(application_id=1, capability="tok")
     assert metric.application_id == 1
+
+
+def test_behavior_metric_create_defaults_capability_to_none_when_omitted():
+    # capability is intentionally optional/nullable at the schema level (see
+    # app/schemas/behavior_metric.py) so the route can normalize a missing
+    # capability into the same neutral "invalid capability" response as a
+    # wrong one, instead of a distinct 422 - see
+    # tests/test_behavior_metrics_capability.py for the route-level neutral-
+    # response contract this enables.
+    metric = BehaviorMetricCreate(application_id=1)
+    assert metric.capability is None
+
+
+def test_behavior_metric_create_accepts_empty_capability_at_schema_level():
+    # Also intentionally accepted here (not rejected via min_length) for the
+    # same reason - the route, not the schema, treats "" as invalid.
+    metric = BehaviorMetricCreate(application_id=1, capability="")
+    assert metric.capability == ""
+
+
+def test_behavior_metric_create_rejects_non_string_capability():
+    with pytest.raises(ValidationError):
+        BehaviorMetricCreate(application_id=1, capability=12345)
+    with pytest.raises(ValidationError):
+        BehaviorMetricCreate(application_id=1, capability={"not": "a string"})
+
+
+def test_behavior_metric_read_never_exposes_capability():
+    from app.schemas.behavior_metric import BehaviorMetricRead
+
+    assert "capability" not in BehaviorMetricRead.model_fields

@@ -11,7 +11,7 @@ import type {
   PrioritizedApplicationList,
   TokenResponse,
 } from '../api/types';
-import { renderAdmin, shouldOfferRegistration } from './admin';
+import { renderAdmin } from './admin';
 
 vi.mock('../api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api/client')>();
@@ -19,7 +19,6 @@ vi.mock('../api/client', async (importOriginal) => {
     ...actual,
     api: {
       checkAuthStatus: vi.fn(),
-      registerAdmin: vi.fn(),
       loginAdmin: vi.fn(),
       getCurrentAdmin: vi.fn(),
       getAllServices: vi.fn(),
@@ -37,7 +36,7 @@ vi.mock('../api/client', async (importOriginal) => {
 });
 
 function makeCheck(overrides: Partial<AuthCheckResponse> = {}): AuthCheckResponse {
-  return { admin_exists: true, registration_allowed: false, ...overrides };
+  return { admin_exists: true, ...overrides };
 }
 
 function makeAdmin(overrides: Partial<AdminRead> = {}): AdminRead {
@@ -162,20 +161,6 @@ afterEach(() => {
   sessionStorage.clear();
 });
 
-describe('shouldOfferRegistration', () => {
-  it('is true only when no admin exists and registration is allowed', () => {
-    expect(shouldOfferRegistration(makeCheck({ admin_exists: false, registration_allowed: true }))).toBe(
-      true,
-    );
-  });
-
-  it('is false once an admin exists, even if registration_allowed were somehow true', () => {
-    expect(
-      shouldOfferRegistration(makeCheck({ admin_exists: true, registration_allowed: false })),
-    ).toBe(false);
-  });
-});
-
 describe('renderAdmin — auth gate', () => {
   it('shows a loading state before checkAuthStatus resolves', () => {
     vi.mocked(api.checkAuthStatus).mockReturnValue(new Promise(() => {})); // never resolves
@@ -186,15 +171,29 @@ describe('renderAdmin — auth gate', () => {
     expect(root.textContent).toContain('Проверяем авторизацию');
   });
 
-  it('shows the registration form when no admin exists yet', async () => {
-    vi.mocked(api.checkAuthStatus).mockResolvedValue(
-      makeCheck({ admin_exists: false, registration_allowed: true }),
-    );
+  it('shows the login form (not a registration form) with a notice when no admin exists yet', async () => {
+    // There is no public self-registration flow - the first admin can only
+    // be created by an operator via the CLI (see backend/app/cli.py). An
+    // empty database still shows the ordinary login form, with an
+    // explanatory notice instead of an actionable "create an admin" form.
+    vi.mocked(api.checkAuthStatus).mockResolvedValue(makeCheck({ admin_exists: false }));
 
     const root = document.createElement('div');
     renderAdmin(root);
 
-    await vi.waitFor(() => expect(root.querySelector('#register-form')).not.toBeNull());
+    await vi.waitFor(() => expect(root.querySelector('#login-form')).not.toBeNull());
+    expect(root.querySelector('#register-form')).toBeNull();
+    expect(root.textContent).toContain('Администратор ещё не настроен');
+  });
+
+  it('shows the login form without the "not configured" notice once an admin exists', async () => {
+    vi.mocked(api.checkAuthStatus).mockResolvedValue(makeCheck({ admin_exists: true }));
+
+    const root = document.createElement('div');
+    renderAdmin(root);
+
+    await vi.waitFor(() => expect(root.querySelector('#login-form')).not.toBeNull());
+    expect(root.textContent).not.toContain('Администратор ещё не настроен');
   });
 
   it('shows the login form when an admin exists and no token is stored', async () => {
@@ -262,70 +261,6 @@ describe('logout', () => {
 
     expect(getToken()).toBeNull();
     expect(root.querySelector('#login-form')).not.toBeNull();
-  });
-});
-
-describe('register form', () => {
-  async function renderRegister(root: HTMLElement): Promise<void> {
-    vi.mocked(api.checkAuthStatus).mockResolvedValue(
-      makeCheck({ admin_exists: false, registration_allowed: true }),
-    );
-    renderAdmin(root);
-    await vi.waitFor(() => expect(root.querySelector('#register-form')).not.toBeNull());
-  }
-
-  function fillAndSubmit(
-    root: HTMLElement,
-    values: { username: string; password: string; confirm: string },
-  ): void {
-    const form = root.querySelector<HTMLFormElement>('#register-form')!;
-    (form.querySelector('#register-username') as HTMLInputElement).value = values.username;
-    (form.querySelector('#register-password') as HTMLInputElement).value = values.password;
-    (form.querySelector('#register-password-confirm') as HTMLInputElement).value = values.confirm;
-    form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
-  }
-
-  it('blocks submission when password and confirmation do not match, without calling the API', async () => {
-    const root = document.createElement('div');
-    await renderRegister(root);
-
-    fillAndSubmit(root, { username: 'admin', password: 'StrongPassw0rd!', confirm: 'Different!' });
-
-    expect(api.registerAdmin).not.toHaveBeenCalled();
-  });
-
-  it('on a 409 conflict, re-checks auth status and transitions to the login form', async () => {
-    const root = document.createElement('div');
-    await renderRegister(root);
-    vi.mocked(api.registerAdmin).mockRejectedValue(new ApiError('conflict', 409));
-    vi.mocked(api.checkAuthStatus).mockResolvedValue(makeCheck());
-
-    fillAndSubmit(root, {
-      username: 'admin',
-      password: 'StrongPassw0rd!',
-      confirm: 'StrongPassw0rd!',
-    });
-
-    await vi.waitFor(() => expect(root.querySelector('#login-form')).not.toBeNull());
-    expect(api.checkAuthStatus).toHaveBeenCalledTimes(2); // initial + post-409 re-check
-  });
-
-  it('auto-logs in and shows the admin panel after a successful registration', async () => {
-    const root = document.createElement('div');
-    await renderRegister(root);
-    vi.mocked(api.registerAdmin).mockResolvedValue(makeAdmin());
-    vi.mocked(api.loginAdmin).mockResolvedValue(makeToken());
-    vi.mocked(api.getCurrentAdmin).mockResolvedValue(makeAdmin());
-
-    fillAndSubmit(root, {
-      username: 'admin',
-      password: 'StrongPassw0rd!',
-      confirm: 'StrongPassw0rd!',
-    });
-
-    await vi.waitFor(() => expect(root.querySelector('#services-list')).not.toBeNull());
-    expect(api.loginAdmin).toHaveBeenCalledWith({ username: 'admin', password: 'StrongPassw0rd!' });
-    expect(getToken()).toBe('a.jwt.token');
   });
 });
 
@@ -455,12 +390,13 @@ describe('async generation guard', () => {
     await vi.waitFor(() => expect(root.querySelector('#login-form')).not.toBeNull());
 
     // The stale generation-1 check now resolves as "no admin yet" — it must
-    // not switch the already-current login view to the registration view.
-    firstCheck.resolve(makeCheck({ admin_exists: false, registration_allowed: true }));
+    // not repaint the already-current login view with the "not configured"
+    // notice belonging to that superseded generation.
+    firstCheck.resolve(makeCheck({ admin_exists: false }));
     await flush();
 
-    expect(root.querySelector('#register-form')).toBeNull();
     expect(root.querySelector('#login-form')).not.toBeNull();
+    expect(root.textContent).not.toContain('Администратор ещё не настроен');
   });
 
   it('a slow stored-token /me check does not open the panel after a newer render (e.g. post-logout)', async () => {
@@ -610,39 +546,6 @@ describe('async generation guard', () => {
     expect(root.querySelector('#login-form')).not.toBeNull();
   });
 
-  it('a stale register-flow does not auto-login or repaint after a newer renderAdmin()', async () => {
-    vi.mocked(api.checkAuthStatus).mockResolvedValue(
-      makeCheck({ admin_exists: false, registration_allowed: true }),
-    );
-    const root = document.createElement('div');
-    renderAdmin(root); // generation 1
-    await vi.waitFor(() => expect(root.querySelector('#register-form')).not.toBeNull());
-
-    const registerDeferred = createDeferred<AdminRead>();
-    vi.mocked(api.registerAdmin).mockReturnValueOnce(registerDeferred.promise);
-
-    const form = root.querySelector<HTMLFormElement>('#register-form')!;
-    (form.querySelector('#register-username') as HTMLInputElement).value = 'admin';
-    (form.querySelector('#register-password') as HTMLInputElement).value = 'StrongPassw0rd!';
-    (form.querySelector('#register-password-confirm') as HTMLInputElement).value =
-      'StrongPassw0rd!';
-    form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
-    await vi.waitFor(() => expect(api.registerAdmin).toHaveBeenCalledTimes(1));
-
-    // A fresh renderAdmin() supersedes this in-flight registration — an
-    // admin now exists per this newer check, so generation 2 shows login.
-    vi.mocked(api.checkAuthStatus).mockResolvedValueOnce(makeCheck());
-    renderAdmin(root); // generation 2
-    await vi.waitFor(() => expect(root.querySelector('#login-form')).not.toBeNull());
-
-    registerDeferred.resolve(makeAdmin());
-    await flush();
-
-    expect(api.loginAdmin).not.toHaveBeenCalled();
-    expect(root.querySelector('#register-form')).toBeNull();
-    expect(root.querySelector('#services-list')).toBeNull();
-    expect(root.querySelector('#login-form')).not.toBeNull();
-  });
 });
 
 describe('in-flight submit guard', () => {
@@ -697,66 +600,6 @@ describe('in-flight submit guard', () => {
     expect(api.loginAdmin).toHaveBeenCalledTimes(2);
   });
 
-  it('a repeated register submit while a request is in flight sends only one request', async () => {
-    vi.mocked(api.checkAuthStatus).mockResolvedValue(
-      makeCheck({ admin_exists: false, registration_allowed: true }),
-    );
-    const root = document.createElement('div');
-    renderAdmin(root);
-    await vi.waitFor(() => expect(root.querySelector('#register-form')).not.toBeNull());
-
-    const registerDeferred = createDeferred<AdminRead>();
-    vi.mocked(api.registerAdmin).mockReturnValueOnce(registerDeferred.promise);
-
-    const form = root.querySelector<HTMLFormElement>('#register-form')!;
-    (form.querySelector('#register-username') as HTMLInputElement).value = 'admin';
-    (form.querySelector('#register-password') as HTMLInputElement).value = 'StrongPassw0rd!';
-    (form.querySelector('#register-password-confirm') as HTMLInputElement).value =
-      'StrongPassw0rd!';
-
-    form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
-    form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
-
-    expect(api.registerAdmin).toHaveBeenCalledTimes(1);
-    expect(root.querySelector<HTMLButtonElement>('#register-submit')!.disabled).toBe(true);
-
-    vi.mocked(api.loginAdmin).mockResolvedValue(makeToken());
-    vi.mocked(api.getCurrentAdmin).mockResolvedValue(makeAdmin());
-    registerDeferred.resolve(makeAdmin());
-
-    await vi.waitFor(() => expect(root.querySelector('#services-list')).not.toBeNull());
-  });
-
-  it('after a register error, the form is submittable again and a fresh submit sends a second request', async () => {
-    vi.mocked(api.checkAuthStatus).mockResolvedValue(
-      makeCheck({ admin_exists: false, registration_allowed: true }),
-    );
-    const root = document.createElement('div');
-    renderAdmin(root);
-    await vi.waitFor(() => expect(root.querySelector('#register-form')).not.toBeNull());
-
-    vi.mocked(api.registerAdmin).mockRejectedValueOnce(new ApiError('weak password', 422));
-
-    const form = root.querySelector<HTMLFormElement>('#register-form')!;
-    (form.querySelector('#register-username') as HTMLInputElement).value = 'admin';
-    (form.querySelector('#register-password') as HTMLInputElement).value = 'StrongPassw0rd!';
-    (form.querySelector('#register-password-confirm') as HTMLInputElement).value =
-      'StrongPassw0rd!';
-    form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
-
-    await vi.waitFor(() =>
-      expect(root.querySelector<HTMLButtonElement>('#register-submit')!.disabled).toBe(false),
-    );
-    expect(api.registerAdmin).toHaveBeenCalledTimes(1);
-
-    vi.mocked(api.registerAdmin).mockResolvedValueOnce(makeAdmin());
-    vi.mocked(api.loginAdmin).mockResolvedValue(makeToken());
-    vi.mocked(api.getCurrentAdmin).mockResolvedValue(makeAdmin());
-    form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
-
-    await vi.waitFor(() => expect(root.querySelector('#services-list')).not.toBeNull());
-    expect(api.registerAdmin).toHaveBeenCalledTimes(2);
-  });
 });
 
 describe('section tabs (Услуги / Заявки / Статистика)', () => {

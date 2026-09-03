@@ -91,6 +91,17 @@ describe('api request URLs (canonical paths — no trailing slash)', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/applications', expect.anything());
   });
 
+  it('parses the behavior_metrics_capability field from the create-application response', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 201,
+      json: async () => ({ id: 1, behavior_metrics_capability: 'one-time-token' }),
+    });
+
+    const result = await api.createApplication({} as unknown as ApplicationCreatePayload);
+    expect(result.behavior_metrics_capability).toBe('one-time-token');
+  });
+
   it('GET /api/applications/prioritized?skip=0&limit=100 by default', async () => {
     await api.getPrioritizedApplications();
     expect(fetchMock).toHaveBeenCalledWith(
@@ -115,7 +126,7 @@ describe('api request URLs (canonical paths — no trailing slash)', () => {
   });
 
   it('POST /api/behavior-metrics', async () => {
-    await api.createBehaviorMetric({ application_id: 1 });
+    await api.createBehaviorMetric({ application_id: 1, capability: 'tok' });
     expect(fetchMock).toHaveBeenCalledWith('/api/behavior-metrics', expect.anything());
   });
 
@@ -206,11 +217,6 @@ describe('api request URLs (canonical paths — no trailing slash)', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/auth/check', expect.anything());
   });
 
-  it('POST /api/auth/register', async () => {
-    await api.registerAdmin({ username: 'admin', password: 'StrongPassw0rd!' });
-    expect(fetchMock).toHaveBeenCalledWith('/api/auth/register', expect.anything());
-  });
-
   it('POST /api/auth/login', async () => {
     await api.loginAdmin({ username: 'admin', password: 'StrongPassw0rd!' });
     expect(fetchMock).toHaveBeenCalledWith('/api/auth/login', expect.anything());
@@ -293,9 +299,8 @@ describe('Authorization header — attached only to protected calls', () => {
   it('public calls never send Authorization even when a token is stored', async () => {
     await api.getActiveServices();
     await api.createApplication({} as unknown as ApplicationCreatePayload);
-    await api.createBehaviorMetric({ application_id: 1 });
+    await api.createBehaviorMetric({ application_id: 1, capability: 'tok' });
     await api.checkAuthStatus();
-    await api.registerAdmin({ username: 'admin', password: 'StrongPassw0rd!' });
     await api.loginAdmin({ username: 'admin', password: 'StrongPassw0rd!' });
 
     for (const call of fetchMock.mock.calls) {

@@ -12,7 +12,6 @@
 import type {
   AdminLoginPayload,
   AdminRead,
-  AdminRegisterPayload,
   AdminSettingCreatePayload,
   AdminSettingRead,
   AdminSettingUpdatePayload,
@@ -20,7 +19,7 @@ import type {
   AnalyticsPeriod,
   ApplicationBehaviorAnalytics,
   ApplicationCreatePayload,
-  ApplicationRead,
+  ApplicationCreateRead,
   AuthCheckResponse,
   BehaviorMetricCreatePayload,
   BehaviorMetricRead,
@@ -167,7 +166,7 @@ export const api = {
   deleteService: (id: number) => del(`/admin-settings/${id}`, { auth: true }),
 
   createApplication: (payload: ApplicationCreatePayload) =>
-    post<ApplicationRead>('/applications', payload),
+    post<ApplicationCreateRead>('/applications', payload),
   getPrioritizedApplications: (skip = 0, limit = 100) => {
     const params = new URLSearchParams({ skip: String(skip), limit: String(limit) });
     return get<PrioritizedApplicationList>(`/applications/prioritized?${params.toString()}`, {
@@ -195,7 +194,6 @@ export const api = {
   },
 
   checkAuthStatus: () => get<AuthCheckResponse>('/auth/check'),
-  registerAdmin: (payload: AdminRegisterPayload) => post<AdminRead>('/auth/register', payload),
   loginAdmin: (payload: AdminLoginPayload) => post<TokenResponse>('/auth/login', payload),
   getCurrentAdmin: () => get<AdminRead>('/auth/me', { auth: true }),
 };

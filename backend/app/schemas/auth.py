@@ -8,6 +8,15 @@ from app.core.security import normalize_username
 
 
 class AdminRegister(BaseModel):
+    """Validation for creating the first Admin.
+
+    Not wired to any HTTP route - the public POST /auth/register endpoint
+    was removed (see app/routes/auth.py and app/cli.py). This schema is now
+    used only by the operator CLI bootstrap command, so the same
+    username/password validation still applies to the one remaining way of
+    creating an admin.
+    """
+
     username: str = Field(..., min_length=3, max_length=150)
     password: str = Field(..., min_length=8, max_length=256)
 
@@ -65,5 +74,10 @@ class TokenResponse(BaseModel):
 
 
 class AuthCheckResponse(BaseModel):
+    """GET /auth/check's only public signal. Deliberately does not (and must
+    never again) expose anything like "registration_allowed": whether an
+    admin can be self-registered over public HTTP is no longer a concept
+    this API has at all - the only way to create the first admin is the
+    operator CLI (see app/cli.py)."""
+
     admin_exists: bool
-    registration_allowed: bool

@@ -95,3 +95,16 @@ class ApplicationRead(ApplicationBase):
     id: int
     created_at: datetime
     updated_at: datetime
+
+
+class ApplicationCreateRead(ApplicationRead):
+    """Response for POST /applications only. Adds the one-time
+    behavior_metrics_capability token the client needs to submit behavior
+    metrics for this application (see
+    app/crud/application_behavior_capability.py and
+    app/schemas/behavior_metric.py::BehaviorMetricCreate.capability). Never
+    used for GET/PATCH - only ApplicationRead crosses those - and the raw
+    token can never be recovered afterward since only its digest is stored.
+    """
+
+    behavior_metrics_capability: str
