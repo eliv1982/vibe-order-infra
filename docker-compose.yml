@@ -18,7 +18,14 @@ services:
   # (pgAdmin и в будущем backend обращаются к сервису по имени "postgres").
   # ------------------------------------------------------------------
   postgres:
-    image: postgres:16.14-alpine
+    # Stage 3: закреплён и по точной версии, и по immutable digest — это
+    # digest манифест-листа (image index), а не одного per-platform
+    # манифеста (проверено `docker buildx imagetools inspect`), поэтому
+    # мультиплатформенность не ломается — `docker pull`/`build` по этому
+    # digest продолжает резолвиться в правильный образ под текущую
+    # архитектуру. Тег рядом с digest — для человека; digest гарантирует,
+    # что под этим тегом впоследствии не подменят содержимое молча.
+    image: postgres:16.14-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
     restart: unless-stopped
     environment:
       POSTGRES_USER: "${POSTGRES_USER:?POSTGRES_USER must be set}"
@@ -50,10 +57,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    # Watchtower явно запрещён (opt-in по label не выставлен = false):
-    # обновление СУБД должно быть осознанным ручным действием.
-    labels:
-      com.centurylinklabs.watchtower.enable: "false"
 
   # ------------------------------------------------------------------
   # pgAdmin — веб-интерфейс администрирования PostgreSQL.
@@ -66,7 +69,9 @@ services:
   #   -> открыть http://127.0.0.1:5050 в браузере на локальной машине
   # ------------------------------------------------------------------
   pgadmin:
-    image: dpage/pgadmin4:9.16
+    # Stage 3: закреплён по версии и immutable manifest-list digest — см.
+    # комментарий у "postgres" выше про мультиплатформенность.
+    image: dpage/pgadmin4:9.16@sha256:40fa840c5bb7c8463957f1255b01283732c2d8c9396a956d180f8e6c296753b3
     restart: unless-stopped
     profiles:
       - admin
@@ -95,11 +100,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    # Watchtower явно запрещён (opt-in по label не выставлен = false):
-    # обновление админ-панели с доступом к БД не должно происходить
-    # без контроля.
-    labels:
-      com.centurylinklabs.watchtower.enable: "false"
 
   # ------------------------------------------------------------------
   # Docker Registry — приватный реестр образов.
@@ -122,7 +122,9 @@ services:
   #     registry/create-user.sh использует htpasswd с хоста (apache2-utils),
   #     а не `docker run --entrypoint htpasswd registry ...`.
   registry:
-    image: registry:3.1.1
+    # Stage 3: закреплён по версии и immutable manifest-list digest — см.
+    # комментарий у "postgres" выше про мультиплатформенность.
+    image: registry:3.1.1@sha256:1be55279f18a2fe1a74edf2664cac61c1bea305b7b4642dab412e7affdcb3e33
     restart: unless-stopped
     environment:
       REGISTRY_AUTH: htpasswd
@@ -148,10 +150,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    # Watchtower: opt-in по label ПОКА выключен (см. пункт 4 отчёта
-    # ревью) — Registry обновляется вручную, контролируемо.
-    labels:
-      com.centurylinklabs.watchtower.enable: "false"
 
   # ------------------------------------------------------------------
   # Nginx — единственный публичный сервис (80/443).
@@ -166,7 +164,9 @@ services:
   # безопасный placeholder, что и был на HTTP.
   # ------------------------------------------------------------------
   nginx:
-    image: nginx:1.30.4-alpine
+    # Stage 3: закреплён по версии и immutable manifest-list digest — см.
+    # комментарий у "postgres" выше про мультиплатформенность.
+    image: nginx:1.30.4-alpine@sha256:dc5069ad14f19660b141b21236140b91656bf89bbc3e2417c70ae650cd66104c
     restart: unless-stopped
     ports:
       - "80:80"
@@ -190,17 +190,23 @@ services:
     networks:
       - proxy-net
     depends_on:
-      - registry
-      # backend: nginx.conf теперь ссылается на upstream "backend" в
-      # location ^~ /api/ (proxy_pass http://backend:8000; без переменной,
-      # т.е. хост резолвится статически при старте/reload). В nginx.conf
-      # нет глобального "resolver", поэтому если backend-контейнер ещё не
-      # создан на proxy-net в момент старта Nginx (холодный старт всего
-      # стека / реюут VPS), Nginx упадёт с "host not found in upstream".
-      # У backend нет healthcheck, поэтому используем ту же простую форму
-      # (без condition), что и у registry — Compose гарантирует, что
-      # backend хотя бы создан/запущен раньше nginx.
-      - backend
+      registry:
+        condition: service_started
+      # Stage 3: backend теперь имеет реальный healthcheck (см. сервис
+      # "backend" ниже и backend/Dockerfile) — condition: service_healthy
+      # заставляет Compose держать Nginx на старте, пока backend не
+      # пройдёт свой healthcheck (readiness через /api/ready), а не просто
+      # "создан/запущен". Раньше (без healthcheck у backend) использовалась
+      # простая форма без condition, что не защищало от гонки: nginx.conf
+      # ссылается на upstream "backend" в location ^~ /api/ (proxy_pass
+      # http://backend:8000; без переменной, т.е. хост резолвится статически
+      # при старте/reload), в nginx.conf нет глобального "resolver" — если
+      # backend-контейнер ещё не готов принимать соединения в момент старта
+      # Nginx (холодный старт всего стека / ребут VPS), Nginx мог упасть с
+      # "host not found in upstream" или начать проксировать на ещё не
+      # готовый backend. condition: service_healthy устраняет эту гонку.
+      backend:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:80/healthz"]
       interval: 15s
@@ -219,62 +225,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    # Watchtower: opt-in по label ПОКА выключен (см. пункт 4 отчёта
-    # ревью) — единственный публичный сервис обновляется вручную,
-    # контролируемо, а не по ночному расписанию.
-    labels:
-      com.centurylinklabs.watchtower.enable: "false"
-
-  # ------------------------------------------------------------------
-  # Watchtower — присутствует и настроен в label-based opt-in режиме
-  # (WATCHTOWER_LABEL_ENABLE=true), но на данном этапе НИ У ОДНОГО
-  # инфраструктурного контейнера label не включён (все
-  # com.centurylinklabs.watchtower.enable=false) — Watchtower ничего
-  # не обновляет автоматически. Это осознанное production-like
-  # решение (см. README, "Watchtower"), а не недосмотр: opt-in
-  # предполагается включать точечно в будущем, в первую очередь для
-  # stateless backend, а не для СУБД/Registry/Nginx/админ-сервисов.
-  # Портов не публикует. Требует доступ к docker.sock — см. README
-  # про связанные риски.
-  #
-  # Образ: nickfedor/watchtower, НЕ containrrr/watchtower — оригинальный
-  # containrrr/watchtower заархивирован (read-only с 2025-12-17) и не
-  # запускается на Docker Engine 29 ("client version 1.25 is too old").
-  # nickfedor/watchtower — поддерживаемый форк, совместимость env vars
-  # проверена перед апгрейдом (см. README, "Watchtower"): все
-  # используемые переменные ниже (WATCHTOWER_LABEL_ENABLE,
-  # WATCHTOWER_CLEANUP, WATCHTOWER_POLL_INTERVAL) задокументированы для
-  # nickfedor/watchtower с теми же именами, типами и значениями по
-  # умолчанию — изменений в environment/command не потребовалось.
-  # ------------------------------------------------------------------
-  watchtower:
-    image: nickfedor/watchtower:1.19.0
-    restart: unless-stopped
-    environment:
-      WATCHTOWER_LABEL_ENABLE: "true"
-      WATCHTOWER_CLEANUP: "true"
-      # Не обязательная переменная: есть безопасное значение по
-      # умолчанию (86400с = раз в сутки), поэтому ${VAR:-default},
-      # а не ${VAR:?...}.
-      WATCHTOWER_POLL_INTERVAL: "${WATCHTOWER_POLL_INTERVAL:-86400}"
-    volumes:
-      # :ro не ограничивает Docker API через сокет (см. README) —
-      # это лишь запрет на замену самого файла сокета.
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    deploy:
-      resources:
-        limits:
-          cpus: "0.25"
-          memory: 128M
-        reservations:
-          memory: 32M
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    # Сам Watchtower себя не обновляет: label намеренно не выставлен,
-    # версия обновляется вручную.
 
   # ------------------------------------------------------------------
   # Stage 2 (database lifecycle): три one-shot сервиса устанавливают роли и
@@ -316,8 +266,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    labels:
-      com.centurylinklabs.watchtower.enable: "false"
 
   db-migrate:
     build: ./backend
@@ -337,8 +285,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    labels:
-      com.centurylinklabs.watchtower.enable: "false"
 
   db-roles-finalize:
     build: ./backend
@@ -362,15 +308,13 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    labels:
-      com.centurylinklabs.watchtower.enable: "false"
 
   # ------------------------------------------------------------------
   # Backend — FastAPI-приложение приёма заявок (см. backend/).
   # Порт 8000 НЕ публикуется на host (нет "ports:") — доступен только
   # другим контейнерам по внутреннему DNS-имени "backend" через
   # app-net (доступ к postgres по hostname "postgres") и proxy-net
-  # (будущий proxy_pass из Nginx, пока не подключён).
+  # (proxy_pass из Nginx — см. nginx/conf.d).
   #
   # Stage 2: подключается ИСКЛЮЧИТЕЛЬНО как runtime-роль (APP_DB_USER/
   # APP_DB_PASSWORD, без прав DDL — см. app/db_admin/bootstrap_roles.py).
@@ -378,6 +322,12 @@ services:
   # видит. Схему больше не создаёт и не мутирует сам (см. app/main.py
   # lifespan / app/core/schema_check.py) — ждёт, пока db-roles-finalize
   # (а значит и db-migrate до него) успешно завершится.
+  #
+  # Stage 3: healthcheck ниже вызывает GET /api/ready изнутри контейнера
+  # (см. backend/healthcheck.py и backend/Dockerfile) — тот же read-only
+  # schema-check, что и app/core/schema_check.py::ensure_database_ready.
+  # Backend становится "healthy" для Compose/Nginx только когда реально
+  # готов обслуживать трафик, а не просто когда стартовал процесс Uvicorn.
   # ------------------------------------------------------------------
   backend:
     build: ./backend
@@ -402,6 +352,12 @@ services:
     depends_on:
       db-roles-finalize:
         condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "healthcheck.py"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
     deploy:
       resources:
         limits:
@@ -414,13 +370,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    # Watchtower пока выключен (false), как и у остальных сервисов:
-    # backend только что реализован и ещё не проходил smoke-test на
-    # VPS. После стабилизации — разумный кандидат на точечный opt-in
-    # (см. README, "Дальше по плану"): stateless-сервис безопаснее
-    # автообновлять, чем СУБД/Registry/Nginx.
-    labels:
-      com.centurylinklabs.watchtower.enable: "false"
 
 networks:
   # Внешний контур: Nginx + Registry. Наружу торчит только Nginx (80/443),

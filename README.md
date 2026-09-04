@@ -5,8 +5,7 @@
 административную панель (JWT-аутентификация, CRUD услуг, обработка и
 приоритизация заявок, поведенческая аналитика), backend на FastAPI,
 PostgreSQL, сбор агрегированных behavior metrics, Nginx как reverse proxy и
-static server, HTTPS, Docker Compose, приватный Docker Registry, Watchtower и
-pgAdmin.
+static server, HTTPS, Docker Compose, приватный Docker Registry и pgAdmin.
 
 Проект учебный, но архитектура и security-подход сделаны в production-like
 стиле: минимальный набор публичных портов, allowlist на уровне Nginx по
@@ -41,12 +40,14 @@ host (backend, PostgreSQL, Registry сегодня так и сделаны, с�
 
 ## Статус проекта
 
-- **Инфраструктура**: `nginx:1.30.4-alpine`, `postgres:16.14-alpine`,
-  `nickfedor/watchtower:1.19.0` и собственный образ `backend` — запущены на
-  production VPS, `RestartCount=0` у всех сервисов. `registry:3.1.1`
-  запущен и работает (у Registry, как и у backend, по дизайну нет
-  Docker-healthcheck, см. "Почему так" ниже). `pgAdmin` запускается только
-  через профиль `admin`, по требованию.
+- **Инфраструктура**: `nginx:1.30.4-alpine`, `postgres:16.14-alpine` и
+  собственный образ `backend` — запущены на production VPS,
+  `RestartCount=0` у всех сервисов. `registry:3.1.1` запущен и работает (у
+  Registry по дизайну нет Docker-healthcheck, см. "Почему так" ниже;
+  `backend` начиная со Stage 3 — есть, см. "Backend healthcheck и
+  readiness"). `pgAdmin` запускается только через профиль `admin`, по
+  требованию. Watchtower удалён из инфраструктуры в Stage 3 (см. "Почему
+  так") — обновления образов теперь только явные, вручную.
 - **HTTPS**: Let's Encrypt сертификат на один SAN на оба домена
   (`vibe.elivcloud.org`, `registry-vibe.elivcloud.org`); `https://vibe.elivcloud.org`
   отвечает `200`; HTTP редиректит на HTTPS, кроме ACME challenge и `/healthz`.
@@ -72,8 +73,7 @@ host (backend, PostgreSQL, Registry сегодня так и сделаны, с�
   — см. "First production admin" ниже).
 
 Не сделано осознанно (см. "Security notes / ограничения" ниже): HSTS,
-автоматизация продления сертификата, Alembic-миграции, Watchtower opt-in
-для backend.
+автоматизация продления сертификата.
 
 ## Архитектура
 
@@ -104,10 +104,8 @@ host (backend, PostgreSQL, Registry сегодня так и сделаны, с�
                                                          ▼
                                             SSH-туннель с локальной машины
 
-Watchtower запущен в label-based opt-in режиме (доступ к docker.sock), но
-сейчас ни один сервис не включен в автоматическое обновление, поскольку
-label com.centurylinklabs.watchtower.enable=false у ВСЕХ сервисов, включая
-backend.
+(Watchtower удалён из инфраструктуры в Stage 3 — обновления образов теперь
+только явные, ручные: `docker compose pull && docker compose up -d`.)
 ```
 
 Ключевые инварианты:
@@ -458,8 +456,8 @@ fallback (см. "Nginx" ниже) и получают тот же `200` с `inde
 
 ## Docker Compose
 
-Сервисы: `postgres`, `backend`, `nginx`, `registry`, `watchtower`, `pgadmin`
-(профиль `admin`).
+Сервисы: `postgres`, `backend`, `nginx`, `registry`, `pgadmin` (профиль
+`admin`).
 
 **backend**: Compose-декларация — `build: ./backend` (build context для
 локальной разработки и для самого первого bootstrap, когда локального
@@ -468,19 +466,20 @@ image собирается вне VPS для `linux/amd64` и доставляе
 Registry (`registry-vibe.elivcloud.org`) с immutable tag, на VPS
 выполняется `docker pull`, а не `docker compose build` (см. "Порядок
 деплоя" ниже); сети — `app-net` (доступ к `postgres`) и `proxy-net`
-(доступность для Nginx); `depends_on: postgres: condition:
-service_healthy`; порт 8000 НЕ публикуется на host (нет `ports:`); лимит
-памяти 192M (reservation 128M, 0.50 cpu); `labels:
-com.centurylinklabs.watchtower.enable: "false"` — как и у остальных
-сервисов на данном этапе (backend относительно недавно вышел в production
-и еще не прошел достаточный период стабильной работы, чтобы доверить его
-пересоздание автообновлению).
+(доступность для Nginx); порт 8000 НЕ публикуется на host (нет `ports:`);
+лимит памяти 192M (reservation 128M, 0.50 cpu). Stage 3: `healthcheck`
+через `backend/healthcheck.py` (stdlib `urllib`, обращается к
+`GET /api/ready` на `127.0.0.1:8000` изнутри контейнера) — см. "Backend
+healthcheck и readiness" ниже.
 
 **nginx**: read-only bind mount `./frontend/dist:/usr/share/nginx/html:ro`
 (собирается вне контейнера, см. "Production build frontend" ниже), плюс
 `nginx.conf`/`conf.d`/`acme-challenge`/сертификаты Let's Encrypt — тоже
-read-only; `depends_on: - registry, - backend` (простая форма без
-`condition`, так как ни у registry, ни у backend нет healthcheck).
+read-only; `depends_on: registry: condition: service_started, backend:
+condition: service_healthy` (Stage 3: у backend теперь есть реальный
+healthcheck, поэтому Nginx стартует только после того, как backend
+реально готов принимать трафик — у registry healthcheck по-прежнему
+намеренно нет, см. ниже).
 
 **postgres**: без публикации порта на host; healthcheck через `pg_isready`;
 наибольшая доля лимита памяти среди всех сервисов (см. "Resource
@@ -489,14 +488,10 @@ protection").
 **registry**: без публикации порта на host; Basic Auth через
 `REGISTRY_AUTH=htpasswd` и файл `registry/auth/htpasswd` (см. "Почему так").
 
-**watchtower**: label-based opt-in (`WATCHTOWER_LABEL_ENABLE=true`), но
-label выставлен в `"false"` у всех сервисов — автообновление сейчас никого
-не затрагивает (см. "Почему так").
-
 **pgadmin**: профиль `admin`, порт только `127.0.0.1:5050` (см. раздел
 "Почему так").
 
-Все шесть сервисов используют `logging: driver: json-file` с `max-size:
+Все пять сервисов используют `logging: driver: json-file` с `max-size:
 "10m"`, `max-file: "3"` — подробнее в разделе "Resource protection".
 
 ## Обязательные переменные окружения (.env)
@@ -540,7 +535,6 @@ label выставлен в `"false"` у всех сервисов — авто�
 Необязательны (есть безопасные значения по умолчанию, совпадающие с
 `Settings` в `app/core/config.py`):
 
-- `WATCHTOWER_POLL_INTERVAL` (по умолчанию 86400с = раз в сутки).
 - `JWT_ALGORITHM` (по умолчанию `HS256`; допустимы только симметричные
   HMAC-варианты — `HS256`/`HS384`/`HS512`).
 - `ACCESS_TOKEN_EXPIRE_MINUTES` (по умолчанию `30`).
@@ -729,8 +723,8 @@ Backup PostgreSQL перед обновлением обязателен тол�
    затрагивает зависимости backend (`postgres` из `depends_on`) — Compose
    не проверяет и не трогает healthcheck `postgres`, а просто пересоздает
    контейнер backend на уже работающей БД. Пересоздается только backend;
-   остальные сервисы — `nginx`, `postgres`, `registry`, `watchtower`,
-   `pgadmin` — не перезапускаются этим шагом. Если релиз меняет схему БД,
+   остальные сервисы — `nginx`, `postgres`, `registry`, `pgadmin` — не
+   перезапускаются этим шагом. Если релиз меняет схему БД,
    при старте backend вызовет `Base.metadata.create_all()` — создаст
    отсутствующие таблицы, существующие таблицы/данные не затрагивает.
 
@@ -1118,49 +1112,28 @@ docker compose --profile admin up -d pgadmin
 docker compose --profile admin stop pgadmin   # когда не нужен
 ```
 
-**Watchtower присутствует, настроен, но пока никого не обновляет.**
-`WATCHTOWER_LABEL_ENABLE=true` переключает Watchtower в режим "обновляю
-только контейнеры с явным label
-`com.centurylinklabs.watchtower.enable=true`". На данном этапе этот label
-выставлен в `"false"` у **всех** сервисов, включая появившийся backend. Это
-осознанное production-like решение, а не недосмотр:
+**Watchtower удалён (Stage 3).** Ранее в составе инфраструктуры присутствовал
+Watchtower (`nickfedor/watchtower`) в label-based opt-in режиме — на практике
+ни один сервис так и не был включен в автообновление (все label
+`com.centurylinklabs.watchtower.enable` стояли в `"false"`), а сам контейнер
+требовал bind-mount `/var/run/docker.sock` — фактически root-доступ к хосту
+через Docker API (флаг `:ro` на монтировании ограничивает только замену
+самого файла сокета, не вызовы API через него). Stage 3 убрал Watchtower и
+этот docker.sock-mount из репозитория целиком: обновления образов теперь
+только явные, ручные (`docker compose pull && docker compose up -d`), без
+постоянно работающего привилегированного контейнера, слушающего Docker API.
 
-- PostgreSQL — обновление СУБД в фоне может уронить данные заявок или тихо
-  сломать совместимость данных с новой мажорной версией.
-- Registry и Nginx — единственные, кто напрямую держит порты наружу; их
-  обновление предпочтительно делать контролируемо, синхронно с проверкой,
-  что сервис поднялся корректно.
-- pgAdmin — админ-панель с доступом к БД; обновлять без присмотра не нужно.
-- backend — реализован недавно, еще не прошел достаточный период
-  стабильной работы на VPS. Как stateless-сервис он — разумный кандидат на
-  точечный opt-in в будущем (проще безопасно пересоздавать автоматически,
-  чем сервисы с состоянием или привилегированным сетевым положением), но
-  это отдельный шаг после стабилизации, не сделанный на данном этапе.
-
-**Watchtower-образ: `nickfedor/watchtower`, а не `containrrr/watchtower`.**
-Оригинальный `containrrr/watchtower` — заархивирован (read-only с 17
-декабря 2025), релизы, багфиксы и security-патчи прекращены. Дополнительно
-он несовместим с современным Docker Engine 29: падает на старте с ошибкой
-`client version 1.25 is too old. Minimum supported API version is 1.44`.
-`nickfedor/watchtower` — активно поддерживаемый форк того же проекта,
-обновляющий внутренние зависимости под текущий Docker API. Перед
-переключением образа проверена (по официальной документации форка,
-watchtower.nickfedor.com) совместимость всех используемых здесь переменных
-окружения — `WATCHTOWER_LABEL_ENABLE`, `WATCHTOWER_CLEANUP`,
-`WATCHTOWER_POLL_INTERVAL` — задокументированы в форке с теми же именами,
-типами и значениями по умолчанию, что и в оригинале.
-
-**Риск docker.sock.** Watchtower должен уметь пересоздавать контейнеры,
-поэтому ему смонтирован `/var/run/docker.sock`. Это дает контейнеру
-фактически root-доступ к хосту: через Docker API можно запустить
-произвольный привилегированный контейнер с бинд-маунтом `/`. Флаг `:ro` на
-монтировании ограничивает только возможность подменить/удалить сам файл
-сокета — он **не** ограничивает вызовы Docker API через этот сокет. Это
-осознанный компромисс, типичный для Watchtower, и в этом учебном проекте
-он сохраняется специально — задание явно требует Watchtower в составе
-инфраструктуры. В проде эту роль обычно возлагают на более узкоправный
-socket-proxy (например, `tecnativa/docker-socket-proxy`) — здесь такой
-прокси сознательно не добавлен, чтобы не усложнять каркас.
+**Backend healthcheck и readiness (Stage 3).** У backend теперь есть
+Docker `HEALTHCHECK` (см. `backend/Dockerfile`, `backend/healthcheck.py`) —
+он вызывает `GET /api/ready` изнутри контейнера через stdlib `urllib` (без
+добавления curl/wget в образ). `/api/ready` (`backend/app/main.py`)
+переиспользует read-only schema-check из Stage 2
+(`app/core/schema_check.py::ensure_database_ready`) — проверяет, что БД
+доступна, роль рабочая и подключенная схема совпадает с ожидаемой, без
+DDL/мутаций. `/api/health` остается чистой liveness-проверкой (без
+обращения к БД). `/api/ready` НЕ проксируется наружу через Nginx (только
+`/api/health` — см. `nginx/conf.d/vibe.elivcloud.org.conf`) — используется
+только Docker healthcheck'ом и локально, изнутри `app-net`/контейнера.
 
 **HTTPS.** Настроен и подтвержден на реальном деплое. Let's Encrypt выпустил
 один сертификат на оба домена (`vibe.elivcloud.org` +
@@ -1191,7 +1164,7 @@ Nginx) — поэтому в registry-конфиге эти заголовки �
 Лимиты заданы через `deploy.resources.limits` — это часть Compose
 Specification и применяется обычным `docker compose up` (swarm не нужен;
 проверено рендерингом через `docker compose config`). Заданы для всех
-шести сервисов: postgres, backend, nginx, registry, pgadmin, watchtower.
+пяти сервисов: postgres, backend, nginx, registry, pgadmin.
 
 | Сервис     | memory limit | memory reservation | cpus |
 |------------|-------------:|--------------------:|-----:|
@@ -1200,26 +1173,24 @@ Specification и применяется обычным `docker compose up` (swar
 | backend    | 192M | 128M | 0.50 |
 | registry   | 192M |  64M | 0.50 |
 | nginx      |  96M |  32M | 0.50 |
-| watchtower | 128M |  32M | 0.25 |
 
 PostgreSQL намеренно получает наибольшую долю (лимит не занижен
 агрессивно) — слишком туго ограниченная СУБД гарантированно упадет по OOM
 под нагрузкой, что хуже, чем не ограничивать ее вовсе.
 
 Сумма лимитов сервисов, работающих по умолчанию (без профиля `admin`):
-postgres + backend + registry + nginx + watchtower =
-384+192+192+96+128 = **992M**. Появление backend заметно сузило запас по
-сравнению с состоянием до backend (было 800M/~200M запаса на ОС и Docker
-daemon) — теперь запас по потолку лимитов минимален. Лимиты — это потолок
-(cgroup limit), а не одновременное резервирование: сумма *reservation*
-для того же набора сервисов заметно ниже (192+128+64+32+32 = 448M), и
-контейнер обычно потребляет меньше своего лимита. Тем не менее, после
-любого редеплоя backend стоит явно сверять фактическое потребление через
-`docker stats --no-stream` (см. "Порядок деплоя" выше), а включение
-профиля `admin` (+256M pgadmin, суммарный потолок — 1248M) на VPS с ~1GB
-RAM разумно только на короткое время проверки, не постоянно.
+postgres + backend + registry + nginx =
+384+192+192+96 = **864M** (Stage 3: Watchtower удален, было 992M с ним).
+Лимиты — это потолок (cgroup limit), а не одновременное резервирование:
+сумма *reservation* для того же набора сервисов заметно ниже
+(192+128+64+32 = 416M), и контейнер обычно потребляет меньше своего
+лимита. Тем не менее, после любого редеплоя backend стоит явно сверять
+фактическое потребление через `docker stats --no-stream` (см. "Порядок
+деплоя" выше), а включение профиля `admin` (+256M pgadmin, суммарный
+потолок — 1120M) на VPS с ~1GB RAM разумно только на короткое время
+проверки, не постоянно.
 
-**Log rotation.** Все шесть сервисов используют `logging: driver:
+**Log rotation.** Все пять сервисов используют `logging: driver:
 json-file` с `max-size: "10m"`, `max-file: "3"` — до ~30MB логов на
 контейнер, дальше старые файлы ротируются. Без этого логи Docker могут
 неограниченно расти и забить диск VPS. (Для Nginx это работает благодаря
@@ -1229,16 +1200,19 @@ json-file` с `max-size: "10m"`, `max-file: "3"` — до ~30MB логов на
 
 ## Версии образов
 
-Образы инфраструктуры зафиксированы на конкретных версиях (без `:latest`):
+Образы инфраструктуры зафиксированы на конкретных версиях (без `:latest`) и,
+начиная со Stage 3, дополнительно закреплены immutable manifest-list digest
+(см. `docker-compose.yml` и `backend/Dockerfile` — точные значения; digest
+здесь — manifest list/image index, не одного per-platform манифеста, чтобы
+не ломать мультиплатформенность):
 
 | Сервис | Образ |
 |---|---|
-| postgres | `postgres:16.14-alpine` |
-| pgadmin | `dpage/pgadmin4:9.16` |
-| registry | `registry:3.1.1` |
-| nginx | `nginx:1.30.4-alpine` |
-| watchtower | `nickfedor/watchtower:1.19.0` |
-| backend | собственная сборка на базе `python:3.12-slim` |
+| postgres | `postgres:16.14-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777` |
+| pgadmin | `dpage/pgadmin4:9.16@sha256:40fa840c5bb7c8463957f1255b01283732c2d8c9396a956d180f8e6c296753b3` |
+| registry | `registry:3.1.1@sha256:1be55279f18a2fe1a74edf2664cac61c1bea305b7b4642dab412e7affdcb3e33` |
+| nginx | `nginx:1.30.4-alpine@sha256:dc5069ad14f19660b141b21236140b91656bf89bbc3e2417c70ae650cd66104c` |
+| backend | собственная сборка на базе `python:3.12.10-slim@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db` |
 
 Для `backend` — две разные, не противоречащие друг другу вещи:
 
@@ -1251,9 +1225,9 @@ json-file` с `max-size: "10m"`, `max-file: "3"` — до ~30MB логов на
   image (см. "Порядок деплоя" ниже — этот же принцип применяется к каждому
   будущему релизу backend, не только к текущему).
 
-Совместимость Watchtower-форка и Registry v3.1.1 с текущей конфигурацией
-проверена по официальной документации (см. раздел "Почему так") перед
-указанием версий в `docker-compose.yml`.
+Совместимость Registry v3.1.1 с текущей конфигурацией проверена по
+официальной документации (см. раздел "Почему так") перед указанием версий
+в `docker-compose.yml`.
 
 ## Security notes / ограничения
 
@@ -1281,8 +1255,8 @@ json-file` с `max-size: "10m"`, `max-file: "3"` — до ~30MB логов на
   хранятся в git — создаются/монтируются на VPS отдельно, `.env` — с правами
   `600`.
 - HSTS не включен, автопродление сертификата Let's Encrypt не
-  автоматизировано, Watchtower не обновляет автоматически ни один сервис
-  (opt-in выключен везде, включая backend).
+  автоматизировано. Watchtower удален из инфраструктуры (Stage 3, см.
+  "Почему так") — обновления образов только явные, ручные.
 
 Проект в целом — учебный: инфраструктура и подход к security сделаны
 production-like, но проект не претендует на полную production-readiness (нет
@@ -1304,9 +1278,11 @@ production-like, но проект не претендует на полную p
   пользователя, например `.`, иначе интерпретировались бы как regex);
   добавлены резервное копирование `htpasswd` перед правкой и явное
   подтверждение при обновлении существующего пользователя.
-- Watchtower по умолчанию не обновляет ни один сервис, включая backend
-  (все label = `false`) — более консервативно, чем буквально требовал
-  первый проход задания.
+- Watchtower удален из инфраструктуры целиком (Stage 3, включая
+  `/var/run/docker.sock`-mount) — консервативнее, чем буквально требовал
+  первый проход задания: обновления образов теперь только явные, ручные,
+  без постоянно работающего привилегированного контейнера с доступом к
+  Docker API.
 - Осознанно НЕ включен `internal: true` на Docker-сетях (хотя это
   дополнительно ужесточило бы изоляцию `app-net`/`proxy-net`), так как это
   взаимодействует с публикацией портов не всегда очевидным образом.
@@ -1326,9 +1302,9 @@ VPS**; полная ручная приемка пройдена (см. "Руч�
 
 1. Внедрить Alembic-миграции вместо `Base.metadata.create_all()` — нужно
    для безопасной эволюции схемы БД в будущем.
-2. Точечный opt-in Watchtower-label для backend (stateless, безопаснее
-   автообновлять), после периода стабильной работы на VPS — не трогая
-   остальные сервисы.
+2. ~~Точечный opt-in Watchtower-label для backend~~ — снято с повестки:
+   Watchtower удален из инфраструктуры целиком в Stage 3 (см. "Почему
+   так"), обновления образов теперь только явные/ручные.
 3. Автоматизировать продление сертификата Let's Encrypt (cron/systemd timer
    с `certbot renew`) — в рамках текущего деплоя настраивался только
    первичный выпуск.

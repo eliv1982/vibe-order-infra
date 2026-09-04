@@ -3,6 +3,16 @@ name = "vibe-order-backend"
 version = "0.1.0"
 description = "FastAPI backend for vibe-order-infra: client applications, behavior metrics and admin settings"
 requires-python = ">=3.12"
+# Stage 3: this pyproject.toml is the source of truth for direct
+# dependencies/constraints, but the Docker image (backend/Dockerfile)
+# installs from backend/requirements.lock.txt, not from this file directly -
+# a pip-compile-generated, hash-verified, fully pinned (incl. transitive)
+# closure. backend/requirements-dev.lock.txt is the equivalent for the
+# [test] extra below (dev/local/test use only, never installed in the
+# runtime image). Regenerate either with the exact command recorded in that
+# file's own header comment whenever this dependencies list (or [test])
+# changes - see tests/test_dependency_lock_consistency.py for the offline
+# regression that catches a forgotten regeneration.
 dependencies = [
     "fastapi>=0.115,<0.116",
     "uvicorn[standard]>=0.32,<0.33",
