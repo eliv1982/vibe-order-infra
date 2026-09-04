@@ -32,6 +32,11 @@ def _insert_application(db_session, created_at: datetime | None = None, **overri
     used only to pin an exact created_at (mirrors test_application_prioritization_api.py)."""
     payload = _application_payload(**overrides)
     payload["budget"] = Decimal(str(payload["budget"]))
+    # Bypasses ApplicationCreate/crud.create_application entirely (direct
+    # ORM insert), so interested_product - normally derived server-side
+    # from the looked-up service (see app/crud/application.py) - must be
+    # set explicitly here.
+    payload["interested_product"] = "Test Default Service"
     application = Application(**payload)
     if created_at is not None:
         application.created_at = created_at

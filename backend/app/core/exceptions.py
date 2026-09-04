@@ -22,3 +22,12 @@ class ConflictError(DomainError):
 class DomainValidationError(DomainError):
     """A business rule was violated once update data is merged with the
     persisted state (e.g. budget_min > budget_max after a partial PATCH)."""
+
+
+class IdempotencyKeyConflictError(DomainError):
+    """An Idempotency-Key header was reused with a request payload that
+    does not match the one originally submitted under that key.
+
+    See app/crud/application.py::create_application_idempotent - the safe,
+    documented behavior for this case is a stable conflict response, never
+    silently returning a result for the mismatched payload."""

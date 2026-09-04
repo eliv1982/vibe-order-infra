@@ -54,7 +54,12 @@ export interface ApplicationCreatePayload {
   need_scope: string;
   deadline: string;
   task_type: string;
-  interested_product: string;
+  // A stable server-side service identifier (AdminSettingRead.id), not a
+  // free-text name - the backend looks it up, verifies it exists/is
+  // active, and derives interested_product (below) from it server-side
+  // (see backend/app/schemas/application.py). Replaces the old
+  // interested_product client field as of Stage 1B.
+  service_id: number;
   budget: number;
   preferred_contact_method: string;
   preferred_contact_time: string;
@@ -76,6 +81,11 @@ export interface ApplicationRead {
   need_scope: string;
   deadline: string;
   task_type: string;
+  // Nullable: a historical row from a database upgraded from the pre-
+  // Stage-1B baseline has no service to point at (see
+  // backend/app/core/schema_compat.py) - every row created through
+  // Stage 1B's POST /applications always has a real value here.
+  service_id: number | null;
   interested_product: string;
   budget: string;
   preferred_contact_method: string;
@@ -86,15 +96,24 @@ export interface ApplicationRead {
 }
 
 /**
- * POST /applications' response only - ApplicationRead plus a one-time
- * capability token the client needs to submit behavior metrics for this
- * application (see backend/app/schemas/application.py::ApplicationCreateRead
- * and backend/app/crud/application_behavior_capability.py). Never returned
- * by GET/PATCH - the raw token isn't stored server-side, so there would be
+ * POST /applications' response only - ApplicationRead plus the
+ * behavior_metrics_capability token the client needs to submit behavior
+ * metrics for this application (see
+ * backend/app/schemas/application.py::ApplicationCreateRead and
+ * backend/app/crud/application_behavior_capability.py). Never returned by
+ * GET/PATCH - the raw token isn't stored server-side, so there would be
  * nothing to return even if they tried.
+ *
+ * Nullable (Stage 1B): a real, usable one-time token is issued exactly once
+ * - on the winning, first-ever creation. Every idempotent retry (see the
+ * Idempotency-Key header on api.createApplication) gets null here instead,
+ * regardless of whether the original capability was already consumed - a
+ * replay is never treated as authorization to mint or recover a capability.
+ * See sendBehaviorMetrics in pages/home.ts for how a null value is handled
+ * (skipped, not an error).
  */
 export interface ApplicationCreateRead extends ApplicationRead {
-  behavior_metrics_capability: string;
+  behavior_metrics_capability: string | null;
 }
 
 // --- backend/app/schemas/application_analysis.py ---

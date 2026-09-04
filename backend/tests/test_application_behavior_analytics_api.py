@@ -7,6 +7,7 @@ skipped with an explicit reason if it's unset.
 
 import pytest
 
+from app.models.behavior_metric import BehaviorMetric
 from tests.db_safety_guard import get_test_database_url
 from tests.test_api import _application_payload
 
@@ -131,9 +132,16 @@ def test_second_metric_for_same_application_is_rejected_by_unique_constraint(cli
 # --- malformed JSON --------------------------------------------------------
 
 
-def test_detail_malformed_json_does_not_500(client, admin_auth_headers):
+def test_public_api_rejects_malformed_metrics_structure(client, admin_auth_headers):
+    """Stage 1B correction: clicked_buttons/cursor_hover_data are now
+    structured, bounded models (see app/schemas/behavior_metric.py) rather
+    than arbitrary JSON - a malformed shape like this is rejected with 422
+    at the API boundary instead of being silently accepted and stored (the
+    prior behavior, still proven not to crash the *analytics* aggregation
+    layer for legacy/pre-existing data below in
+    test_detail_does_not_500_on_malformed_legacy_db_data)."""
     application_id, capability = _create_application_with_capability(client)
-    create_resp = client.post(
+    response = client.post(
         "/api/behavior-metrics",
         json={
             "application_id": application_id,
@@ -142,7 +150,25 @@ def test_detail_malformed_json_does_not_500(client, admin_auth_headers):
             "cursor_hover_data": {"hero": "not-a-dict", "": {"hovers": 1, "ms": 1}},
         },
     )
-    assert create_resp.status_code == 201
+    assert response.status_code == 422
+
+
+def test_detail_does_not_500_on_malformed_legacy_db_data(client, admin_auth_headers, db_session):
+    """app/services/behavior_analytics.py must still tolerate malformed
+    clicked_buttons/cursor_hover_data shapes for a row that predates - or
+    otherwise bypassed - Stage 1B's structural validation (e.g. a direct ORM
+    insert, matching how this row is created here). The public API itself
+    now rejects such a shape outright (see
+    test_public_api_rejects_malformed_metrics_structure above), so this is
+    the only remaining way such data could exist."""
+    application_id = _create_application(client)
+    metric = BehaviorMetric(
+        application_id=application_id,
+        clicked_buttons=[{"button": "x"}, 123, None, {"count": 5}],
+        cursor_hover_data={"hero": "not-a-dict", "": {"hovers": 1, "ms": 1}},
+    )
+    db_session.add(metric)
+    db_session.commit()
 
     response = client.get(f"/api/analytics/applications/{application_id}", headers=admin_auth_headers)
     assert response.status_code == 200

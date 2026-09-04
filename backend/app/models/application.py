@@ -32,6 +32,7 @@ class Application(Base):
         need_scope TEXT NOT NULL,
         deadline VARCHAR(100) NOT NULL,
         task_type VARCHAR(100) NOT NULL,
+        service_id INTEGER NULL REFERENCES admin_settings(id),
         interested_product VARCHAR(255) NOT NULL,
         budget NUMERIC(12, 2) NOT NULL,
         preferred_contact_method VARCHAR(50) NOT NULL,
@@ -40,6 +41,26 @@ class Application(Base):
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+
+    service_id/interested_product (see app/schemas/application.py): the
+    client only ever chooses a service_id - a stable AdminSetting id, looked
+    up and validated (exists, is_active, budget within [budget_min,
+    budget_max]) server-side at creation (app/crud/application.py). The
+    client never supplies interested_product directly; it is a denormalized
+    snapshot of that service's service_name at submission time, so the
+    applicant's stated intent survives even if the service is later renamed
+    (or deactivated - service_id has no ON DELETE CASCADE, so a service with
+    existing applications cannot be deleted at all; see
+    app/crud/admin_setting.py).
+
+    service_id is nullable at the DB/model level - not because a new
+    submission is ever allowed to omit it (ApplicationCreate.service_id is
+    required, see app/schemas/application.py), but because a database
+    upgraded from the accepted Stage 1A baseline (see
+    app/core/schema_compat.py) has historical rows with no service to point
+    at and no deterministic way to infer one from their free-text
+    interested_product alone. ApplicationRead.service_id is therefore also
+    Optional, so those historical rows keep reading back correctly.
     """
 
     __tablename__ = "applications"
@@ -58,6 +79,7 @@ class Application(Base):
     need_scope: Mapped[str] = mapped_column(Text)
     deadline: Mapped[str] = mapped_column(String(100))
     task_type: Mapped[str] = mapped_column(String(100))
+    service_id: Mapped[int | None] = mapped_column(ForeignKey("admin_settings.id"), nullable=True)
     interested_product: Mapped[str] = mapped_column(String(255))
     budget: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     preferred_contact_method: Mapped[str] = mapped_column(String(50))

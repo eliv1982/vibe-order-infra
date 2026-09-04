@@ -79,6 +79,9 @@ interface RequestOpts {
    * treat a 401 response as "clear the stored token" — opt-in per call so
    * public endpoints never send a token they don't need. */
   auth?: boolean;
+  /** Extra request headers beyond Content-Type/Accept/Authorization - e.g.
+   * Idempotency-Key on POST /applications (see api.createApplication). */
+  headers?: Record<string, string>;
 }
 
 /** Defense-in-depth beyond tokenStorage's own guarantee: never let a
@@ -113,6 +116,7 @@ async function request<T>(
     'Content-Type': 'application/json',
     Accept: 'application/json',
     ...(options.headers as Record<string, string> | undefined),
+    ...opts.headers,
   };
 
   if (opts.auth) {
@@ -165,8 +169,17 @@ export const api = {
     patch<AdminSettingRead>(`/admin-settings/${id}`, payload, { auth: true }),
   deleteService: (id: number) => del(`/admin-settings/${id}`, { auth: true }),
 
-  createApplication: (payload: ApplicationCreatePayload) =>
-    post<ApplicationCreateRead>('/applications', payload),
+  /**
+   * `idempotencyKey`, when given, is sent as the `Idempotency-Key` header
+   * (see backend/app/routes/applications.py) - a retry with the same key
+   * and the same payload is guaranteed to return the original application
+   * rather than create a duplicate. Optional: omitting it falls back to
+   * the plain, non-idempotent behavior (always creates a new application).
+   */
+  createApplication: (payload: ApplicationCreatePayload, idempotencyKey?: string) =>
+    post<ApplicationCreateRead>('/applications', payload, {
+      headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+    }),
   getPrioritizedApplications: (skip = 0, limit = 100) => {
     const params = new URLSearchParams({ skip: String(skip), limit: String(limit) });
     return get<PrioritizedApplicationList>(`/applications/prioritized?${params.toString()}`, {

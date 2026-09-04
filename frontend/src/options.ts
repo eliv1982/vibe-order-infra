@@ -1,10 +1,15 @@
 /**
  * Option lists for the Application form's "enum-like" fields.
  *
- * The backend stores these as plain VARCHAR/TEXT with no enum constraint
- * (see backend/app/models/application.py), so there is no fixed set of
- * values to match — these are frontend-chosen, human-readable labels
- * stored verbatim as the field value.
+ * As of Stage 1B, these are an authoritative closed set: the backend
+ * mirrors this exact list of values as Literal types in
+ * backend/app/schemas/application_options.py and rejects (422) any
+ * request whose value isn't in it — a direct HTTP client can no longer
+ * send an arbitrary string for these fields. If this file ever
+ * adds/removes/renames an option, application_options.py must change in
+ * the same commit (backend/tests/test_application_options_sync.py asserts
+ * the two stay in sync), or a legitimate frontend submission using the new
+ * option will start being rejected as invalid.
  *
  * Legacy naming note: the exported constant names and the underlying
  * field/column names they back (business_niche, company_size,

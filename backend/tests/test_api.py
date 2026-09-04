@@ -11,6 +11,7 @@ from decimal import Decimal
 
 import pytest
 
+from tests.conftest import DEFAULT_TEST_SERVICE_ID
 from tests.db_safety_guard import get_test_database_url
 
 TEST_DATABASE_URL = get_test_database_url()
@@ -22,23 +23,32 @@ pytestmark = pytest.mark.skipif(
 
 
 def _application_payload(**overrides) -> dict:
+    # Every field below must be a value the backend actually accepts as of
+    # Stage 1B (see app/schemas/application.py): business_niche/company_size/
+    # business_size/requester_role/task_scope/task_type/deadline/
+    # preferred_contact_method/preferred_contact_time are now closed Literal
+    # enums (app/schemas/application_options.py, mirroring
+    # frontend/src/options.ts exactly) rather than arbitrary strings, and
+    # service_id (see DEFAULT_TEST_SERVICE_ID) replaces the old free-text
+    # interested_product - the backend now derives interested_product itself
+    # from the looked-up service.
     payload = {
         "first_name": "Ivan",
         "last_name": "Petrov",
         "contact_data": "ivan@example.com",
-        "business_niche": "Retail",
-        "company_size": "10-50",
+        "business_niche": "Личный автомобиль",
+        "company_size": "Седан или универсал",
         "business_info": "Online shop",
-        "task_scope": "Website redesign",
-        "requester_role": "owner",
-        "business_size": "small",
+        "task_scope": "Разовая услуга",
+        "requester_role": "Владелец автомобиля",
+        "business_size": "Один автомобиль",
         "need_scope": "full redesign",
-        "deadline": "1 month",
-        "task_type": "development",
-        "interested_product": "Website",
+        "deadline": "В течение месяца",
+        "task_type": "Плановый уход",
+        "service_id": DEFAULT_TEST_SERVICE_ID,
         "budget": "1000.00",
-        "preferred_contact_method": "email",
-        "preferred_contact_time": "morning",
+        "preferred_contact_method": "Телефон",
+        "preferred_contact_time": "Утро (9:00–12:00)",
     }
     payload.update(overrides)
     return payload

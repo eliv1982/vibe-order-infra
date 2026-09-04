@@ -38,6 +38,8 @@ os.environ.setdefault(
     "JWT_SECRET_KEY", "test-only-secret-key-for-pytest-do-not-use-in-prod-1234567890"
 )
 
+from decimal import Decimal
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -46,6 +48,43 @@ from sqlalchemy.orm import Session
 from tests.db_safety_guard import assert_safe_test_database_url, get_test_database_url
 
 TEST_DATABASE_URL = get_test_database_url()
+
+# Stage 1B: POST /applications now requires a valid, active service_id (see
+# app/schemas/application.py and app/crud/application.py). Rather than have
+# every one of the ~40 call sites across the test suite create its own
+# AdminSetting, one is seeded once per test session (see _seed_default_test_
+# service below) with a wide-open budget range so it fits every existing
+# test's budget value unmodified. It is deliberately the *first* row ever
+# inserted into admin_settings for the whole session (committed directly
+# against db_engine, before any per-test savepoint/db_session exists), so
+# its id is always exactly this constant - PostgreSQL SERIAL sequences are
+# NOT rolled back by a savepoint, but this row itself never is either (it's
+# committed outside any per-test transaction), so it stays present and
+# stable for every test. tests/test_api.py::_application_payload references
+# this constant directly.
+DEFAULT_TEST_SERVICE_ID = 1
+_DEFAULT_TEST_SERVICE_BUDGET_MIN = Decimal("0")
+_DEFAULT_TEST_SERVICE_BUDGET_MAX = Decimal("9999999999.99")  # NUMERIC(12, 2) ceiling
+
+
+def _seed_default_test_service(engine) -> None:
+    from app.models.admin_setting import AdminSetting
+
+    with Session(engine) as session:
+        setting = AdminSetting(
+            service_name="Test Default Service",
+            budget_min=_DEFAULT_TEST_SERVICE_BUDGET_MIN,
+            budget_max=_DEFAULT_TEST_SERVICE_BUDGET_MAX,
+            is_active=True,
+        )
+        session.add(setting)
+        session.commit()
+        session.refresh(setting)
+        assert setting.id == DEFAULT_TEST_SERVICE_ID, (
+            "expected the first-ever admin_settings row in a freshly created "
+            f"test database to get id={DEFAULT_TEST_SERVICE_ID}, got {setting.id} - "
+            "was a stray row inserted before this fixture ran?"
+        )
 
 
 @pytest.fixture(scope="session")
@@ -63,6 +102,7 @@ def db_engine():
 
     engine = create_engine(TEST_DATABASE_URL)
     Base.metadata.create_all(bind=engine)
+    _seed_default_test_service(engine)
 
     yield engine
 

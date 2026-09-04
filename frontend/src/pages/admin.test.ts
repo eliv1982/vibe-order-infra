@@ -75,6 +75,7 @@ function makeApplicationItem(overrides: Partial<ApplicationPriorityRead> = {}): 
       need_scope: 'Полировка',
       deadline: 'В течение недели',
       task_type: 'Восстановление',
+      service_id: 1,
       interested_product: 'Полировка кузова',
       budget: '25000.00',
       preferred_contact_method: 'Телефон',

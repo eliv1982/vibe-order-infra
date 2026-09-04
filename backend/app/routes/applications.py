@@ -1,13 +1,14 @@
 """HTTP routes for the Application entity: validate via schemas, delegate logic to crud."""
 
+import re
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_current_admin
-from app.core.exceptions import ConflictError
+from app.core.exceptions import ConflictError, DomainValidationError, IdempotencyKeyConflictError
 from app.crud import application as crud
 from app.models.application import Application
 from app.schemas.application import (
@@ -24,6 +25,27 @@ from app.schemas.application_analysis import (
 from app.services.application_scoring import ApplicationScore, score_application
 
 router = APIRouter(prefix="/applications", tags=["applications"])
+
+# Bounded format for the optional Idempotency-Key header (Stage 1B
+# correction): a restricted charset and a minimum length, chosen for
+# collision resistance between unrelated keys - NOT as an entropy/
+# authorization requirement. The backend cannot tell a genuinely random
+# client-supplied key from a short, guessable-but-format-valid one, so a
+# successful replay is never treated as proof of possession of anything: it
+# only recognizes a duplicate submission and returns the original
+# Application, never a behavior-metrics capability (see
+# app/crud/application.py::create_application_idempotent's module-level
+# design note - a capability is only ever handed out once, on the winning
+# first-ever creation). 43 characters is the length secrets.token_urlsafe(32)
+# always produces - kept as the floor because it comfortably avoids
+# accidental collisions between distinct legitimate submissions, not because
+# a caller-chosen key needs to resist brute force. Only a SHA-256 digest of
+# this key is ever persisted (app/core/security.hash_idempotency_key,
+# app/models/application_idempotency_key.py). The frontend generates exactly
+# this shape (see frontend/src/utils/idempotencyKey.ts); never logged
+# unnecessarily (see app/crud/application.py's module docstring), and never
+# reflected back in any response.
+_IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{43,128}$")
 
 
 def _created_at_sort_key(created_at: datetime | None) -> tuple[int, datetime]:
@@ -71,16 +93,41 @@ def _to_priority_read(application: Application, score: ApplicationScore) -> Appl
 
 @router.post("", response_model=ApplicationCreateRead, status_code=status.HTTP_201_CREATED)
 def create_application(
-    payload: ApplicationCreate, db: Session = Depends(get_db)
+    payload: ApplicationCreate,
+    db: Session = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> ApplicationCreateRead:
     # Public: this is the client-facing application form's submit endpoint.
-    # The response includes a one-time behavior_metrics_capability the
-    # client needs to submit behavior metrics for this application (see
-    # POST /behavior-metrics) - this is the only time it is ever returned.
+    # The response includes a behavior_metrics_capability the client needs
+    # to submit behavior metrics for this application (see
+    # POST /behavior-metrics) - normally a one-time token, but see
+    # ApplicationCreateRead's docstring for the (nullable) idempotent-retry
+    # case.
+    #
+    # Idempotency-Key (Stage 1B) is entirely optional: a caller that omits
+    # it gets exactly the prior, non-idempotent behavior (a brand-new
+    # Application every call) - see app/crud/application.py for the full
+    # idempotency design.
+    if idempotency_key is not None and not _IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Idempotency-Key must be 43-128 characters from [A-Za-z0-9_-]",
+        )
+
     try:
-        application, capability_token = crud.create_application(db, payload)
+        if idempotency_key is not None:
+            application, capability_token = crud.create_application_idempotent(
+                db, payload, idempotency_key
+            )
+        else:
+            application, capability_token = crud.create_application(db, payload)
+    except IdempotencyKeyConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except DomainValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     except ConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
     return ApplicationCreateRead(
         **ApplicationRead.model_validate(application).model_dump(),
         behavior_metrics_capability=capability_token,

@@ -33,8 +33,27 @@ def get_admin_settings(db: Session, skip: int = 0, limit: int = 100) -> list[Adm
 
 
 def get_active_admin_settings(db: Session) -> list[AdminSetting]:
+    """Active services only, for the public service-selection dropdown.
+
+    Excludes a row whose service_name is blank/whitespace-only after
+    normalization - AdminSettingCreate/Update reject such a value going
+    forward (see app/schemas/admin_setting.py), but a historical row
+    written before that validation existed can still hold one. Filtered in
+    Python (not SQL) so "whitespace-only" means exactly what Python's
+    str.strip() means everywhere else this same check is made (see
+    app/crud/application.py::_create_application_row) - PostgreSQL's TRIM()
+    only strips plain spaces by default, not tabs/newlines, which would let
+    a tab/newline-only name slip through a SQL-level filter. Admin reads
+    (get_admin_settings/get_admin_setting) deliberately do NOT apply this
+    filter - an operator must still be able to see and fix such a row - and
+    POST /applications independently re-checks service_name under its own
+    row lock so a client that already has this id cached, or calls the
+    endpoint directly, can never use it to create a new Application either.
+    """
     stmt = select(AdminSetting).where(AdminSetting.is_active.is_(True)).order_by(AdminSetting.id)
-    return list(db.scalars(stmt).all())
+    return [
+        setting for setting in db.scalars(stmt).all() if setting.service_name.strip()
+    ]
 
 
 def update_admin_setting(

@@ -378,6 +378,11 @@ def test_historical_application_without_a_capability_row_fails_neutrally(client,
     special case."""
     payload = _application_payload()
     payload["budget"] = Decimal(str(payload["budget"]))
+    # Bypasses ApplicationCreate/crud.create_application entirely (direct
+    # ORM insert, simulating pre-existing data), so interested_product -
+    # normally derived server-side from the looked-up service (see
+    # app/crud/application.py) - must be set explicitly here.
+    payload["interested_product"] = "Test Default Service"
     historical_application = Application(**payload)
     db_session.add(historical_application)
     db_session.commit()
@@ -432,6 +437,11 @@ def test_every_invalid_capability_reason_yields_the_identical_response(client, d
     # historical application, no capability row at all
     payload = _application_payload()
     payload["budget"] = Decimal(str(payload["budget"]))
+    # Bypasses ApplicationCreate/crud.create_application entirely (direct
+    # ORM insert, simulating pre-existing data), so interested_product -
+    # normally derived server-side from the looked-up service (see
+    # app/crud/application.py) - must be set explicitly here.
+    payload["interested_product"] = "Test Default Service"
     historical_application = Application(**payload)
     db_session.add(historical_application)
     db_session.commit()

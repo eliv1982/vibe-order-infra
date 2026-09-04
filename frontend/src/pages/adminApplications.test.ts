@@ -58,6 +58,7 @@ function makeApplication(overrides: Partial<ApplicationRead> = {}): ApplicationR
     need_scope: 'Хочу восстановить блеск кузова',
     deadline: 'В течение недели',
     task_type: 'Восстановление внешнего вида',
+    service_id: 1,
     interested_product: 'Полировка кузова',
     budget: '25000.00',
     preferred_contact_method: 'Телефон',

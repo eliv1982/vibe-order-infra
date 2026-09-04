@@ -34,6 +34,11 @@ def _insert_application(db_session, created_at: datetime | None = None, **overri
     """
     payload = _application_payload(**overrides)
     payload["budget"] = Decimal(str(payload["budget"]))
+    # Bypasses ApplicationCreate/crud.create_application entirely (direct
+    # ORM insert), so interested_product - normally derived server-side
+    # from the looked-up service (see app/crud/application.py) - must be
+    # set explicitly here.
+    payload["interested_product"] = "Test Default Service"
     application = Application(**payload)
     if created_at is not None:
         application.created_at = created_at
@@ -189,18 +194,33 @@ def test_prioritized_pagination_rejects_invalid_params(client, admin_auth_header
     assert response.status_code == 422
 
 
-def test_prioritized_does_not_500_on_unknown_legacy_values(client, admin_auth_headers):
-    client.post(
-        "/api/applications",
-        json=_application_payload(
-            deadline="Совершенно неизвестное значение",
-            business_size="Индивидуальный предприниматель",
-            task_scope="Пробный проект",
-            task_type="Разработка с нуля",
-            business_niche="Другое",
-            requester_role="Сотрудник",
-        ),
+def test_prioritized_does_not_500_on_unknown_legacy_values(
+    client, admin_auth_headers, db_session
+):
+    """Stage 1B made business_niche/company_size/deadline/etc. closed
+    Literal enums (see app/schemas/application.py), so the public API can no
+    longer be used to store an unknown/legacy value for them (see
+    tests/test_api.py::test_application_create_rejects_invalid_categorical_value).
+    The scoring/listing pipeline must still never 500 on such a value,
+    though - e.g. a row inserted directly (bypassing the API) before this
+    stage, by a maintenance script, or by a future relaxation of the enum -
+    so this now inserts directly via the ORM rather than through POST, and
+    keeps proving the defensive property score_application/list-prioritized
+    already guarantees for any string (see
+    test_application_scoring.py::test_unknown_and_legacy_values_do_not_raise_and_score_zero)."""
+    payload = _application_payload(
+        deadline="Совершенно неизвестное значение",
+        business_size="Индивидуальный предприниматель",
+        task_scope="Пробный проект",
+        task_type="Разработка с нуля",
+        business_niche="Другое",
+        requester_role="Сотрудник",
     )
+    payload["budget"] = Decimal(str(payload["budget"]))
+    payload["interested_product"] = "Test Default Service"
+    db_session.add(Application(**payload))
+    db_session.commit()
+
     response = client.get("/api/applications/prioritized", headers=admin_auth_headers)
     assert response.status_code == 200
 
@@ -232,6 +252,7 @@ def test_list_applications_endpoint_keeps_previous_contract(client, admin_auth_h
         "need_scope",
         "deadline",
         "task_type",
+        "service_id",
         "interested_product",
         "budget",
         "preferred_contact_method",

@@ -19,12 +19,24 @@ import {
   TASK_TYPE_OPTIONS,
 } from '../options';
 import { escapeHtml } from '../utils/html';
+import { generateIdempotencyKey } from '../utils/idempotencyKey';
 import { clampToRange, computeInitialBudget, formatBudget, pickBudgetStep } from '../utils/format';
 
 interface HomeState {
   selectedService: AdminSettingRead | null;
   selectedBudget: number;
   createdApplicationId: number | null;
+  /**
+   * Idempotency-Key for the current submission attempt (see
+   * api.createApplication and backend/app/crud/application.py). Generated
+   * lazily on the first submit attempt and *reused* across retries of that
+   * same attempt - see submissionIdempotencyKey/handleSubmit's catch block:
+   * it is only cleared (forcing a fresh key next time) after a response
+   * that proves the server never created anything (a definite validation
+   * rejection), never after an ambiguous failure (network error, timeout,
+   * 5xx) where the original request may have actually succeeded server-side.
+   */
+  idempotencyKey: string | null;
 }
 
 export function renderHome(root: HTMLElement): void {
@@ -35,6 +47,7 @@ export function renderHome(root: HTMLElement): void {
     selectedService: null,
     selectedBudget: 0,
     createdApplicationId: null,
+    idempotencyKey: null,
   };
 
   wireHeroSection(root);
@@ -555,7 +568,7 @@ async function handleSubmit(
     need_scope: getValue('need_scope'),
     deadline: getValue('deadline'),
     task_type: getValue('task_type'),
-    interested_product: selectedService.service_name,
+    service_id: selectedService.id,
     // Final defensive clamp — the value sent to the backend must never
     // fall outside the service's own [budget_min, budget_max].
     budget: clampToRange(state.selectedBudget, min, max),
@@ -564,21 +577,49 @@ async function handleSubmit(
     comment: getOptionalValue('comment'),
   };
 
+  // Lazily generated, then *reused* across retries of this same attempt -
+  // see HomeState.idempotencyKey's docstring. A brand-new key here (rather
+  // than at form-mount time) means an application submitted earlier in the
+  // same page load that already succeeded (form is hidden after success, so
+  // this path isn't re-entered) never shares a key with a later, unrelated
+  // one - there is none, since only one submission ever happens per load.
+  if (!state.idempotencyKey) {
+    state.idempotencyKey = generateIdempotencyKey();
+  }
+
   try {
-    const application = await api.createApplication(payload);
+    const application = await api.createApplication(payload, state.idempotencyKey);
     state.createdApplicationId = application.id;
 
     form.hidden = true;
     bannerEl.innerHTML =
       '<div class="banner banner--success">Заявка отправлена! Мы свяжемся с вами в ближайшее время.</div>';
 
-    void sendBehaviorMetrics(application.id, application.behavior_metrics_capability);
+    if (application.behavior_metrics_capability) {
+      void sendBehaviorMetrics(application.id, application.behavior_metrics_capability);
+    }
+    // A null capability means this was an idempotent retry - a replay never
+    // gets a usable capability, regardless of whether the original one was
+    // already consumed (see ApplicationCreateRead's docstring on the
+    // backend) - nothing to send again.
   } catch (error) {
     const message =
       error instanceof ApiError ? error.message : 'Не удалось отправить заявку. Попробуйте ещё раз.';
     bannerEl.innerHTML = `<div class="banner banner--error">${escapeHtml(message)}</div>`;
     submitBtn.disabled = false;
     submitBtn.textContent = 'Отправить заявку';
+
+    // A 422/409 means the server definitively rejected this exact attempt
+    // and created nothing - safe (and necessary, to avoid a spurious
+    // Idempotency-Key conflict) to start the next attempt fresh. Any other
+    // failure (network error, timeout, 5xx, ...) is ambiguous - the request
+    // may have actually reached and been committed by the server - so the
+    // same key is kept and reused on retry, letting the backend's
+    // idempotency handling resolve it safely instead of risking a
+    // duplicate application.
+    if (error instanceof ApiError && (error.status === 422 || error.status === 409)) {
+      state.idempotencyKey = null;
+    }
   }
 }
 

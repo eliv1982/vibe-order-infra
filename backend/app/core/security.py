@@ -6,6 +6,7 @@ Never logs or stores a plaintext password anywhere.
 """
 
 import hashlib
+import json
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -81,6 +82,44 @@ def generate_capability_token() -> str:
 
 def hash_capability_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+# Idempotency-Key support for POST /applications (see
+# app/crud/application.py::create_application_idempotent and
+# app/models/application_idempotency_key.py for the full rationale). Only
+# this digest of the client-supplied key is ever persisted, never the raw
+# key. Unlike hash_capability_token above, this is NOT authorization
+# material - a caller picks its own Idempotency-Key, and the backend has no
+# way to tell a genuinely random one from a short, guessable-but-format-
+# valid one (see app/routes/applications.py's length/charset check, which
+# bounds collisions between unrelated keys, not entropy). That is exactly
+# why POST /applications never treats "the caller can replay this key" as
+# proof of anything beyond "this is the same logical request" - a replay
+# only ever returns the original Application, never a behavior-metrics
+# capability (see create_application_idempotent's module-level design
+# note). A fast SHA-256 digest here is still the right choice - not because
+# the key is high-entropy, but because it isn't a secret whose offline
+# brute-forcing needs a slow KDF: recovering the raw key from this digest
+# only reveals which prior request to recognize as a duplicate, nothing an
+# attacker can act on.
+def hash_idempotency_key(raw_key: str) -> str:
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
+# What *is* hashed alongside the key above is the request payload itself, so
+# a replayed key can be checked against the original payload without storing
+# the payload a second time.
+def hash_idempotency_payload(payload: dict[str, Any]) -> str:
+    """Deterministic digest of a JSON-compatible request payload.
+
+    `sort_keys=True` makes the digest independent of dict insertion order;
+    the caller is expected to pass something like
+    `ApplicationCreate.model_dump(mode="json")`, where every value is
+    already a JSON-primitive (Decimal -> str, etc.), so no `default=`
+    fallback is needed here.
+    """
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class TokenError(Exception):
