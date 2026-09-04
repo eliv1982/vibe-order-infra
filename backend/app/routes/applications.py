@@ -1,7 +1,6 @@
 """HTTP routes for the Application entity: validate via schemas, delegate logic to crud."""
 
 import re
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -22,7 +21,14 @@ from app.schemas.application_analysis import (
     PrioritizedApplicationList,
     ScoringReason,
 )
-from app.services.application_scoring import ApplicationScore, score_application
+from app.services.application_scoring import ApplicationScore, PriorityLevel, score_application
+
+# Bounds a search query to a sane length before it ever reaches the database
+# (Stage 4 correction) - generous enough for any realistic name/contact/
+# service/vehicle-description substring, but small enough to keep the
+# ILIKE scan (see crud.get_prioritized_applications_page) cheap regardless of
+# who's typing.
+_SEARCH_MAX_LENGTH = 200
 
 router = APIRouter(prefix="/applications", tags=["applications"])
 
@@ -46,33 +52,6 @@ router = APIRouter(prefix="/applications", tags=["applications"])
 # unnecessarily (see app/crud/application.py's module docstring), and never
 # reflected back in any response.
 _IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{43,128}$")
-
-
-def _created_at_sort_key(created_at: datetime | None) -> tuple[int, datetime]:
-    """Normalize created_at into a sort key that is safe to compare.
-
-    Returns (presence_flag, normalized_datetime):
-
-    - presence_flag=0 for a known created_at, sorted by the normalized,
-      UTC-aware datetime ascending;
-    - presence_flag=1 if created_at is unexpectedly None, always sorting
-      after every known date (tuple comparison short-circuits on this
-      first element, so the placeholder datetime alongside it is never
-      actually compared against a real one).
-
-    A naive datetime is deterministically treated as UTC (for this sort
-    only - no claim is made about its true origin) so it can be compared
-    against timezone-aware values without Python's "can't compare
-    offset-naive and offset-aware datetimes" TypeError. This compares
-    datetimes directly rather than converting to POSIX timestamps, so it
-    avoids platform-sensitive overflow issues (e.g. datetime.min.timestamp()
-    on Windows).
-    """
-    if created_at is None:
-        return (1, datetime.min.replace(tzinfo=timezone.utc))
-    if created_at.tzinfo is None:
-        return (0, created_at.replace(tzinfo=timezone.utc))
-    return (0, created_at.astimezone(timezone.utc))
 
 
 def _to_priority_read(application: Application, score: ApplicationScore) -> ApplicationPriorityRead:
@@ -151,36 +130,41 @@ def list_applications(
 def list_prioritized_applications(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=100),
+    search: str | None = Query(None, max_length=_SEARCH_MAX_LENGTH),
+    priority: PriorityLevel | None = Query(None),
     db: Session = Depends(get_db),
 ) -> PrioritizedApplicationList:
     # Declared before GET /{application_id} so "prioritized" is matched
     # here rather than being captured by that dynamic int path.
     #
-    # Учебный этап: набор заявок мал, поэтому весь список загружается в
-    # память и сортируется в Python. При заметном росте объёма данных
-    # потребуется materialized scoring на уровне БД (например, хранимая
-    # колонка/вьюха) или отдельная стратегия пагинации, считающая score
-    # порциями, а не через полную выборку.
-    applications = crud.get_all_applications(db)
-
-    scored = [(application, score_application(application)) for application in applications]
-    scored.sort(
-        key=lambda pair: (
-            -pair[1].score,
-            _created_at_sort_key(pair[0].created_at),
-            pair[0].id,
-        )
+    # Stage 4: ordering, OFFSET and LIMIT all run in PostgreSQL against the
+    # materialized Application.priority_score column (see
+    # crud.get_prioritized_applications_page and that column's docstring in
+    # app/models/application.py) - only the `limit` rows actually returned
+    # are ever loaded into Python, never the whole applications table.
+    # score_application() is still called here, but only over that same
+    # small page, to build each item's full explanation (reasons,
+    # recommended_action, ...) - priority_score itself only carries the
+    # sortable number, not the breakdown.
+    #
+    # search/priority (Stage 4 correction): optional server-side criteria,
+    # both omitted by default so an existing caller that never sends them
+    # keeps getting the exact same unfiltered, paginated result as before.
+    # Applied inside get_prioritized_applications_page before COUNT and
+    # OFFSET/LIMIT, so `total` below is the filtered corpus size whenever a
+    # criterion is active - never the whole table's count - and pagination
+    # walks the filtered result set, not the unfiltered one. `priority` is
+    # validated as one of the closed PriorityLevel values by FastAPI itself
+    # (an unrecognized value is a 422, not a silently-ignored filter).
+    applications, total = crud.get_prioritized_applications_page(
+        db, skip=skip, limit=limit, search=search, priority=priority
     )
 
-    total = len(scored)
-    page = scored[skip : skip + limit]
+    items = [
+        _to_priority_read(application, score_application(application)) for application in applications
+    ]
 
-    return PrioritizedApplicationList(
-        items=[_to_priority_read(application, score) for application, score in page],
-        total=total,
-        skip=skip,
-        limit=limit,
-    )
+    return PrioritizedApplicationList(items=items, total=total, skip=skip, limit=limit)
 
 
 @router.get(

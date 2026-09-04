@@ -142,7 +142,7 @@ def test_pg_dump_restore_round_trip_then_adopt_and_migrate(source_legacy_databas
         try:
             with migrated_engine.connect() as conn:
                 version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                assert version == "0003_stage1b_service_idemp"
+                assert version == "0004_stage4_priority_score"
                 # 6. Verify row counts/data are unchanged after migration too.
                 assert conn.execute(text("SELECT count(*) FROM admins")).scalar_one() == 1
                 assert conn.execute(text("SELECT count(*) FROM applications")).scalar_one() == 2

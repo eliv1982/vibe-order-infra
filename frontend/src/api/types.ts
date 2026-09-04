@@ -199,6 +199,10 @@ export interface AnalyticsOverview {
   applications_without_metrics: number;
   average_time_on_page_seconds: number | null;
   median_time_on_page_seconds: number | null;
+  // Mean/sum of return_count (see ApplicationBehaviorAnalytics.return_count
+  // below for what that value actually is) across every metric in the
+  // period - the admin UI labels these "Визиты с устройства", not
+  // "Возвраты" (see pages/adminAnalytics.ts).
   average_return_count: number | null;
   total_return_count: number;
   total_button_clicks: number;
@@ -211,6 +215,16 @@ export interface ApplicationBehaviorAnalytics {
   application_id: number;
   has_metrics: boolean;
   time_on_page_seconds: number | null;
+  // The value of a long-lived counter kept in the applicant's own browser
+  // localStorage (see backend/app/models/behavior_metric.py and frontend/
+  // src/metrics/behaviorMetrics.ts::readAndIncrementReturnCount), read at
+  // the moment this application was submitted - "which visit number, on
+  // that browser, this submission happened to be" (1 = no prior visit was
+  // ever recorded on it). NOT a count of returns to this specific form,
+  // a session count, or a distinct-visitor count - see backend/app/
+  // services/behavior_analytics.py's module docstring for the full,
+  // end-to-end-traced explanation. Displayed as "Счётчик визитов
+  // (устройство)" (see pages/adminApplications.ts), never as "returns".
   return_count: number | null;
   clicked_buttons: ButtonAnalyticsItem[];
   section_activity: SectionAnalyticsItem[];

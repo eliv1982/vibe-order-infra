@@ -25,6 +25,27 @@ behaviorMetrics.ts and its test file, and app/models/behavior_metric.py):
   negative/NaN/Infinity) exists for hypothetical legacy/malformed rows and
   for objects constructed directly in unit tests, not because the normal
   write path can currently produce such values.
+- `return_count` (Stage 4 finding - traced end-to-end from frontend/src/
+  metrics/behaviorMetrics.ts::readAndIncrementReturnCount through
+  frontend/src/pages/home.ts::renderHome -> initBehaviorTracking): it is
+  the value of a long-lived counter stored in the *visitor's own browser*
+  localStorage (key "aurel_return_count"), incremented once every time the
+  home page mounts (a real page load, or an SPA navigation back to it from
+  /admin) and captured into the submitted BehaviorMetric at the moment that
+  particular Application was created. It is NOT a count of how many times
+  the applicant came back to *this* form, not a session count, not a page-
+  visibility-event count, and not an application/submission count - it is
+  "which visit number, on this browser, this submission happened to be"
+  (1 = no prior visit was ever recorded on that browser; N = N-1 prior
+  visits were). Summing/averaging it across applications (build_overview
+  below) therefore sums/averages those per-device snapshot values - a
+  meaningful aggregate of the collected data, but not equivalent to "total
+  distinct return visits across all users in the period", since two
+  applications from the same browser contribute two different snapshot
+  values of the *same* underlying counter, and different browsers/devices
+  each keep their own independent count. The admin UI labels this
+  accordingly ("Визиты с устройства", not "Возвраты" - see
+  frontend/src/pages/adminAnalytics.ts).
 - `BehaviorMetric.application_id` is NOT NULL with a UNIQUE constraint (see
   app/models/behavior_metric.py), so in the real schema at most one metric
   row can ever exist per application, and every metric always references an

@@ -27,6 +27,19 @@ services:
     # что под этим тегом впоследствии не подменят содержимое молча.
     image: postgres:16.14-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
     restart: unless-stopped
+    # Stage 4: `no-new-privileges` blocks a process from gaining more
+    # privileges than it started with (e.g. via a setuid/setgid binary) -
+    # this image's entrypoint never needs that, so it's a no-downside
+    # hardening flag. Deeper hardening (cap_drop, read_only) is NOT applied
+    # here: the official postgres entrypoint runs its first-time init
+    # (initdb, chown of the data directory to the postgres user) as root
+    # before dropping to the postgres user for the server process itself -
+    # cap_drop: ALL would remove CAP_CHOWN/CAP_FOWNER that step needs, and
+    # read_only would need tmpfs mounts for /var/run/postgresql (the unix
+    # socket) and more, verified live before trusting it. Deferred - see
+    # the Stage 4 report's "Deferred findings".
+    security_opt:
+      - no-new-privileges:true
     environment:
       POSTGRES_USER: "${POSTGRES_USER:?POSTGRES_USER must be set}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
@@ -75,6 +88,20 @@ services:
     restart: unless-stopped
     profiles:
       - admin
+    # Stage 4: `no-new-privileges` was tried here (live, via `docker compose
+    # --profile admin up`) and reverted - pgAdmin's own entrypoint detects a
+    # "restricted security context" under it and silently switches its
+    # internal listen port from 80 to 8080 ("Restricted security context
+    # detected; defaulting PGADMIN_LISTEN_PORT to 8080" in its own logs),
+    # which breaks the fixed `127.0.0.1:5050:80` port mapping below (and the
+    # documented SSH-tunnel access flow - see this service's header comment)
+    # with no reachable service on the other end. Exactly the "breaks normal
+    # operation" case the Stage 4 spec says to revert rather than force
+    # through with a workaround (e.g. changing the port mapping to 8080
+    # would work, but is a bigger, less obviously-safe change than this
+    # stage's "low risk only" hardening scope justifies for an admin-only,
+    # loopback-only, profile-gated tool). Deferred - see the Stage 4
+    # report's "Deferred findings".
     environment:
       PGADMIN_DEFAULT_EMAIL: "${PGADMIN_DEFAULT_EMAIL:?PGADMIN_DEFAULT_EMAIL must be set}"
       PGADMIN_DEFAULT_PASSWORD: "${PGADMIN_DEFAULT_PASSWORD:?PGADMIN_DEFAULT_PASSWORD must be set}"
@@ -126,6 +153,13 @@ services:
     # комментарий у "postgres" выше про мультиплатформенность.
     image: registry:3.1.1@sha256:1be55279f18a2fe1a74edf2664cac61c1bea305b7b4642dab412e7affdcb3e33
     restart: unless-stopped
+    # Stage 4: see postgres's security_opt comment above for the same
+    # rationale - this flag alone is unconditionally safe; cap_drop/
+    # read_only are deferred without a live compatibility proof for this
+    # image specifically (untested whether its own runtime user can write
+    # /var/lib/registry - the named volume - under a read-only root fs).
+    security_opt:
+      - no-new-privileges:true
     environment:
       REGISTRY_AUTH: htpasswd
       REGISTRY_AUTH_HTPASSWD_REALM: Registry Realm
@@ -168,6 +202,33 @@ services:
     # комментарий у "postgres" выше про мультиплатформенность.
     image: nginx:1.30.4-alpine@sha256:dc5069ad14f19660b141b21236140b91656bf89bbc3e2417c70ae650cd66104c
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    # Stage 4: cap_drop ALL + a minimal explicit cap_add, proven live (see
+    # the Stage 4 report) - the official nginx image's master process starts
+    # as root only to bind ports 80/443 (NET_BIND_SERVICE) and to setuid/
+    # setgid its worker processes down to the "nginx" user (SETUID/SETGID);
+    # CHOWN covers the entrypoint's ownership fix-up of its own writable
+    # runtime directories below. Everything else this image does is
+    # ordinary unprivileged work.
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+      - SETUID
+      - SETGID
+      - CHOWN
+    # read_only root filesystem, proven live: every actual write nginx does
+    # at runtime is confined to a short, fixed list of paths, all now
+    # tmpfs - access/error logs are symlinked to /dev/stdout,/dev/stderr by
+    # this image already (no log directory writes needed), so only the
+    # proxy/client-body buffering cache dirs, the pid file and /tmp (the
+    # entrypoint's own scratch space) need to be writable.
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+      - /tmp
     ports:
       - "80:80"
       - "443:443"
@@ -247,6 +308,36 @@ services:
   db-roles-bootstrap:
     build: ./backend
     command: ["python", "-m", "app.db_admin.bootstrap_roles"]
+    # Stage 4 correction: this one-shot service inherits the backend image's
+    # HEALTHCHECK (backend/Dockerfile - CMD ["python", "healthcheck.py"],
+    # which polls HTTP :8000/api/ready). This container never listens on
+    # 8000 at all (it runs bootstrap_roles.py, not uvicorn) and exits for
+    # good after doing its one job - Docker would keep probing a port that
+    # was never open and eventually record "unhealthy" even after a
+    # successful exit 0, which is misleading noise, not a real signal (the
+    # actual outcome is already the exit code Compose's own
+    # service_completed_successfully dependency below acts on). Disabling
+    # the inherited healthcheck here does not change backend's own
+    # healthcheck/lifecycle at all - each service's `healthcheck:` is
+    # independent.
+    healthcheck:
+      disable: true
+    # Stage 4: this image's CMD/all four launches always run as the
+    # unprivileged `appuser` (see backend/Dockerfile's USER appuser) and
+    # never write to their own container filesystem (no uploads, no local
+    # cache/log files - logs go to stdout, captured by the json-file
+    # driver below) - a pure Python process that needs zero Linux
+    # capabilities and no writable root fs, proven live (see the Stage 4
+    # report). /tmp is tmpfs only because Python's own stdlib (tempfile,
+    # some C extensions) can reach for it defensively even though this
+    # application never actually does.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
     environment:
       POSTGRES_USER: "${POSTGRES_USER:?POSTGRES_USER must be set}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
@@ -270,6 +361,17 @@ services:
   db-migrate:
     build: ./backend
     command: ["alembic", "upgrade", "head"]
+    # See db-roles-bootstrap's healthcheck/hardening comments above - same
+    # image, same fix, same reasoning.
+    healthcheck:
+      disable: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
     environment:
       POSTGRES_DB: "${POSTGRES_DB:?POSTGRES_DB must be set}"
       POSTGRES_HOST: postgres
@@ -289,6 +391,17 @@ services:
   db-roles-finalize:
     build: ./backend
     command: ["python", "-m", "app.db_admin.bootstrap_roles"]
+    # See db-roles-bootstrap's healthcheck/hardening comments above - same
+    # image, same fix, same reasoning.
+    healthcheck:
+      disable: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
     environment:
       POSTGRES_USER: "${POSTGRES_USER:?POSTGRES_USER must be set}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
@@ -332,6 +445,16 @@ services:
   backend:
     build: ./backend
     restart: unless-stopped
+    # Stage 4: see db-roles-bootstrap's matching comment above - same image,
+    # same unprivileged/no-local-writes reasoning, proven live serving real
+    # traffic (not just a one-shot exit) as part of this hardening pass.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
     environment:
       APP_DB_USER: "${APP_DB_USER:?APP_DB_USER must be set}"
       APP_DB_PASSWORD: "${APP_DB_PASSWORD:?APP_DB_PASSWORD must be set}"

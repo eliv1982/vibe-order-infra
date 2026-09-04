@@ -2,15 +2,30 @@
  * "Заявки" (client applications) section of the admin panel.
  *
  * Owns everything specific to browsing prioritized applications: loading,
- * local filter/search, cards, and the detail modal. Auth, the render
- * generation guard, logout and the "Услуги" section stay in admin.ts —
- * this module never touches sessionStorage/tokenStorage or the auth flow
- * directly; a 401 is reported upward via ApplicationsSectionHost so admin.ts
- * remains the single place that ends a session.
+ * filter/search, cards, and the detail modal. Auth, the render generation
+ * guard, logout and the "Услуги" section stay in admin.ts — this module
+ * never touches sessionStorage/tokenStorage or the auth flow directly; a
+ * 401 is reported upward via ApplicationsSectionHost so admin.ts remains
+ * the single place that ends a session.
  *
  * Score is never recomputed here — every number/label rendered comes
  * straight from GET /api/applications/prioritized, already sorted by the
  * backend.
+ *
+ * Stage 4 correction: the priority-level chips and the search box are both
+ * sent to the backend as `priority`/`search` query params (see
+ * api.getPrioritizedApplications) and applied there before pagination -
+ * `state.items` is always exactly one already-filtered, already-paginated
+ * page, never re-filtered client-side. Earlier Stage 4 filtered only
+ * whatever page was already loaded (filterApplications/matchesSearch, since
+ * removed) - correct on a single-page dataset, but presented as
+ * application-wide while a match sitting on a later unfiltered page was
+ * invisible from page 1, and a real corpus-wide zero was indistinguishable
+ * from that. Changing either criterion resets to the first page (see
+ * wireControls) and re-fetches; search is debounced (see
+ * SEARCH_DEBOUNCE_MS) and, like every other trigger for a new page load,
+ * goes through state.loadGeneration so a slow, now-stale response can never
+ * overwrite a newer one (see loadApplications).
  *
  * Mounted once (see mountAdminApplications) by admin.ts's tab switcher; the
  * returned controller's activate()/deactivate()/dispose() then track
@@ -18,11 +33,12 @@
  * admin.ts's own auth/session generation (see ApplicationsSectionHost).
  */
 
-import { api, isUnauthorizedError } from '../api/client';
+import { api, isUnauthorizedError, type PrioritizedApplicationsQuery } from '../api/client';
 import type { ApplicationBehaviorAnalytics, ApplicationPriorityRead, ApplicationRead, PriorityLevel } from '../api/types';
 import { escapeHtml } from '../utils/html';
 import { formatBudget } from '../utils/format';
 import {
+  applyBarWidths,
   buttonAnalyticsListHtml,
   formatAnalyticsDateTime,
   formatCount,
@@ -53,12 +69,37 @@ export interface ApplicationsSectionController {
 
 type FilterLevel = 'all' | PriorityLevel;
 
+/** Fixed page size for GET /applications/prioritized — matches the previous
+ * hardcoded default (see PrioritizedApplicationList's skip/limit/total
+ * fields, api/types.ts) so a dataset that fits on one page renders exactly
+ * as before; the difference is Stage 4's Prev/Next controls (see
+ * renderPager) that now let the admin reach rows beyond it instead of the
+ * list silently stopping at the first 100. */
+const APPLICATIONS_PAGE_SIZE = 100;
+
+/** Debounce delay for the search input (Stage 4 correction) — long enough
+ * that a normal typing cadence sends one request per pause, not one per
+ * keystroke, short enough that the result still feels immediate. Priority
+ * chip clicks skip this entirely (see wireControls) — a single discrete
+ * click is never rapid-fire the way typing is. */
+const SEARCH_DEBOUNCE_MS = 350;
+
 interface ApplicationsState {
+  /** Exactly one backend-filtered, backend-paginated page — never
+   * re-filtered client-side (see this module's docstring). The "Просмотр"
+   * button's data-index refers directly into this array. */
   items: ApplicationPriorityRead[];
-  /** Exactly what's currently rendered in #applications-list, in render
-   * order — the "Просмотр" button's data-index refers into this array, not
-   * into `items`, so filtering/searching can never desync the two. */
-  visibleItems: ApplicationPriorityRead[];
+  /** Offset of `items`' first row within the full backend-ordered,
+   * backend-filtered set (the `skip` GET /applications/prioritized was
+   * last called with) — 0 is the first page. */
+  skip: number;
+  /** Total row count across every page of the *current* filter/search
+   * criteria, as last reported by the backend (PrioritizedApplicationList.
+   * total) — null before the first successful load. Used to size/enable
+   * the pager and to tell a genuine corpus-wide zero apart from "still
+   * loading"; never assumed stable across a reload (a concurrent admin/
+   * applicant can change it, and it changes whenever the criteria do). */
+  total: number | null;
   filterLevel: FilterLevel;
   searchQuery: string;
   loading: boolean;
@@ -76,6 +117,17 @@ interface ApplicationsState {
   /** Guards against a second overlapping detail request for the same modal
    * generation (e.g. a rapid double-click on the "Повторить" retry button). */
   modalAnalyticsLoading: boolean;
+  /** Bumped on every loadApplications() call, regardless of trigger (tab
+   * activation, refresh, pager, or a filter/search change) — the response
+   * only ever gets applied if it's still the latest generation when it
+   * arrives, so a slow, now-stale response (e.g. an earlier search value)
+   * can never overwrite a newer one, even if requests resolve out of
+   * order. */
+  loadGeneration: number;
+  /** Pending debounce timer for a search-input change (see wireControls) —
+   * cleared on deactivate()/dispose() so a stray reload can never fire
+   * after the tab becomes inactive or the mount is torn down. */
+  searchDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
 /**
@@ -116,33 +168,29 @@ export function formatApplicationDate(iso: string): string {
   return applicationDateFormatter.format(date);
 }
 
-function matchesSearch(item: ApplicationPriorityRead, normalizedQuery: string): boolean {
-  if (!normalizedQuery) return true;
-  const app = item.application;
-  const haystack = [
-    app.first_name,
-    app.last_name,
-    app.contact_data,
-    app.interested_product,
-    app.business_info,
-  ]
-    .join(' ')
-    .toLowerCase();
-  return haystack.includes(normalizedQuery);
+/** Pure — unit tested. True while either criterion would narrow the result
+ * below "every application" — drives the choice between "Заявок пока нет."
+ * (a genuinely empty, unfiltered corpus) and "Ничего не найдено." (this
+ * criteria combination has zero matches) in renderList, and the optional
+ * "Найдено: N" line above the grid. */
+export function hasActiveCriteria(filterLevel: FilterLevel, searchQuery: string): boolean {
+  return filterLevel !== 'all' || searchQuery.trim() !== '';
 }
 
-/** Pure — unit tested. Preserves the backend-supplied order (Array.filter
- * never reorders); never touches priority_score/level itself. */
-export function filterApplications(
-  items: ApplicationPriorityRead[],
+/** Pure — unit tested. The exact query GET /applications/prioritized is
+ * called with for a given filter/search state: blank/whitespace-only search
+ * and the 'all' level both mean "no criterion", represented by simply
+ * omitting that key (see api.getPrioritizedApplications) rather than
+ * sending an empty string or the literal 'all'. */
+export function buildPrioritizedQuery(
   filterLevel: FilterLevel,
   searchQuery: string,
-): ApplicationPriorityRead[] {
-  const normalizedQuery = searchQuery.trim().toLowerCase();
-  return items.filter((item) => {
-    if (filterLevel !== 'all' && item.priority_level !== filterLevel) return false;
-    return matchesSearch(item, normalizedQuery);
-  });
+): PrioritizedApplicationsQuery {
+  const query: PrioritizedApplicationsQuery = {};
+  const trimmedSearch = searchQuery.trim();
+  if (trimmedSearch !== '') query.search = trimmedSearch;
+  if (filterLevel !== 'all') query.priority = filterLevel;
+  return query;
 }
 
 // --- Runtime value hardening ---------------------------------------------
@@ -384,6 +432,10 @@ function applicationModalBodyTemplate(item: ApplicationPriorityRead): string {
 // helpers as the "Статистика" tab (see adminAnalytics.ts) so the two never
 // drift apart, and never repeats the period-level overview KPIs.
 
+// Stage 4 correction: detail.return_count is the value of a per-device
+// localStorage visit counter at submission time (see adminAnalytics.ts's
+// "Визиты с устройства" KPI group for the full explanation the label below
+// deliberately mirrors), not a count of returns to this specific form.
 function applicationAnalyticsDetailHtml(detail: ApplicationBehaviorAnalytics): string {
   if (!detail.has_metrics) {
     return '<p class="admin-empty">Для этой заявки поведенческие метрики не записаны.</p>';
@@ -392,7 +444,7 @@ function applicationAnalyticsDetailHtml(detail: ApplicationBehaviorAnalytics): s
   const summaryHtml = `
     <dl>
       <div><dt>Время на странице</dt><dd>${escapeHtml(formatSeconds(detail.time_on_page_seconds))}</dd></div>
-      <div><dt>Возвратов к форме</dt><dd>${escapeHtml(formatCount(detail.return_count))}</dd></div>
+      <div><dt>Счётчик визитов (устройство)</dt><dd>${escapeHtml(formatCount(detail.return_count))}</dd></div>
       <div><dt>Кликов по кнопкам</dt><dd>${escapeHtml(formatCount(detail.total_button_clicks))}</dd></div>
       <div><dt>Метрика записана</dt><dd>${escapeHtml(formatAnalyticsDateTime(detail.recorded_at))}</dd></div>
     </dl>
@@ -455,6 +507,7 @@ async function loadApplicationAnalytics(
     const detail = await api.getApplicationBehaviorAnalytics(applicationId);
     if (!isStillCurrent()) return;
     contentEl.innerHTML = applicationAnalyticsDetailHtml(detail);
+    applyBarWidths(contentEl);
   } catch (error) {
     if (!isStillCurrent()) return;
     if (isUnauthorizedError(error)) {
@@ -486,7 +539,12 @@ function shellTemplate(): string {
       </div>
       <div class="applications-search-row">
         <label class="sr-only" for="applications-search">Поиск по заявкам</label>
-        <input type="search" id="applications-search" placeholder="Имя, контакты, услуга, автомобиль…" />
+        <input
+          type="search"
+          id="applications-search"
+          placeholder="Имя, контакты, услуга, автомобиль…"
+          maxlength="200"
+        />
         <button type="button" class="btn btn-secondary btn-small" id="applications-refresh">
           Обновить
         </button>
@@ -495,6 +553,8 @@ function shellTemplate(): string {
 
     <div id="applications-status" role="status" aria-live="polite"></div>
     <div class="applications-grid" id="applications-list"></div>
+
+    <div class="applications-pager" id="applications-pager" role="status" aria-live="polite"></div>
 
     <div class="modal-overlay" id="application-modal-overlay" hidden>
       <div
@@ -522,18 +582,16 @@ function shellTemplate(): string {
 
 /**
  * Shows a transient status message (loading/error) and — crucially — drops
- * the old dataset along with it: `items`/`visibleItems` are cleared here,
- * not just the DOM, so a filter/search change made while this message is
- * showing (loadApplications's loading/error paths, both of which route
- * through here) can never re-filter a stale, previously-loaded set back
- * onto the screen (see renderList's loading/hasLoadError guard for the
- * error banner's own protection against being overwritten in turn).
+ * the old dataset along with it: `items` is cleared here, not just the DOM,
+ * so the previous page/criteria's rows can never be resurrected onto the
+ * screen while a new request for different criteria is in flight (see
+ * renderList's loading/hasLoadError guard for the error banner's own
+ * protection against being overwritten in turn).
  */
 function setStatusMessage(container: HTMLElement, state: ApplicationsState, message: string): void {
   const statusEl = container.querySelector<HTMLElement>('#applications-status');
   const listEl = container.querySelector<HTMLElement>('#applications-list');
   state.items = [];
-  state.visibleItems = [];
   if (statusEl) statusEl.innerHTML = `<p class="admin-empty">${escapeHtml(message)}</p>`;
   if (listEl) listEl.innerHTML = '';
 }
@@ -543,35 +601,72 @@ function setRefreshDisabled(container: HTMLElement, disabled: boolean): void {
   if (button) button.disabled = disabled;
 }
 
+/**
+ * Prev/Next + "N–M из T" range — the backend already returns skip/limit/
+ * total on every load (PrioritizedApplicationList, api/types.ts); before
+ * Stage 4 the admin UI simply never asked for anything past the first
+ * page. Rendered from `state.skip`/`state.total`/`state.items.length`
+ * alone (never re-derives them from the DOM), and hidden entirely while
+ * there is no successful load to page through yet (loading, error, or
+ * before the first response — see loadApplications).
+ */
+function renderPager(container: HTMLElement, state: ApplicationsState): void {
+  const pagerEl = container.querySelector<HTMLElement>('#applications-pager');
+  if (!pagerEl) return;
+
+  if (state.total === null || state.loading || state.hasLoadError) {
+    pagerEl.innerHTML = '';
+    return;
+  }
+
+  const from = state.total === 0 ? 0 : state.skip + 1;
+  const to = state.skip + state.items.length;
+  const hasPrev = state.skip > 0;
+  const hasNext = state.skip + state.items.length < state.total;
+
+  pagerEl.innerHTML = `
+    <button type="button" class="btn btn-secondary btn-small" id="applications-prev" ${hasPrev ? '' : 'disabled'}>
+      Назад
+    </button>
+    <span class="applications-pager-range">Заявки ${from}–${to} из ${state.total}</span>
+    <button type="button" class="btn btn-secondary btn-small" id="applications-next" ${hasNext ? '' : 'disabled'}>
+      Далее
+    </button>
+  `;
+}
+
+/**
+ * Renders exactly what the last successful load returned — `state.items` is
+ * already the backend-filtered, backend-paginated page, so this never
+ * re-filters it. Only called right after a successful load (see
+ * loadApplications), so `state.loading`/`state.hasLoadError` are always
+ * false here in practice; the empty-vs-"Ничего не найдено" choice below
+ * still has to happen somewhere, so it lives here rather than in
+ * loadApplications itself.
+ */
 function renderList(container: HTMLElement, state: ApplicationsState): void {
   const statusEl = container.querySelector<HTMLElement>('#applications-status');
   const listEl = container.querySelector<HTMLElement>('#applications-list');
   if (!statusEl || !listEl) return;
 
   if (state.items.length === 0) {
-    state.visibleItems = [];
-    // items is empty because a load is currently in flight or the last one
-    // failed (see loadApplications/setStatusMessage) — that status message
-    // already owns the (already-empty) list; a filter/search change must
-    // not paint over it with "Заявок пока нет.".
-    if (state.loading || state.hasLoadError) return;
     listEl.innerHTML = '';
-    statusEl.innerHTML = '<p class="admin-empty">Заявок пока нет.</p>';
+    // A genuine corpus-wide zero for the *active* criteria (backend-
+    // reported, see loadApplications) — "Ничего не найдено" only ever
+    // reflects that, never a merely-empty current page of an otherwise
+    // non-empty filtered result (impossible here: an empty page can only
+    // happen at skip=0, since wirePager never lets skip advance past
+    // state.total).
+    statusEl.innerHTML = hasActiveCriteria(state.filterLevel, state.searchQuery)
+      ? '<p class="admin-empty">Ничего не найдено. Попробуйте изменить фильтр или запрос.</p>'
+      : '<p class="admin-empty">Заявок пока нет.</p>';
     return;
   }
 
-  const filtered = filterApplications(state.items, state.filterLevel, state.searchQuery);
-  state.visibleItems = filtered;
-
-  if (filtered.length === 0) {
-    listEl.innerHTML = '';
-    statusEl.innerHTML =
-      '<p class="admin-empty">Ничего не найдено. Попробуйте изменить фильтр или запрос.</p>';
-    return;
-  }
-
-  statusEl.innerHTML = `<p class="applications-count">Найдено: ${filtered.length} из ${state.items.length}</p>`;
-  listEl.innerHTML = filtered.map((item, index) => applicationCardTemplate(item, index)).join('');
+  statusEl.innerHTML = hasActiveCriteria(state.filterLevel, state.searchQuery)
+    ? `<p class="applications-count">Найдено: ${state.total ?? state.items.length}</p>`
+    : '';
+  listEl.innerHTML = state.items.map((item, index) => applicationCardTemplate(item, index)).join('');
 }
 
 async function loadApplications(
@@ -581,10 +676,17 @@ async function loadApplications(
   activationId: number,
   isStillCurrent: (activationId: number) => boolean,
 ): Promise<void> {
-  // Refuses to start a second overlapping request — this alone guarantees
-  // at most one in-flight fetch per activation, so a stale response can
-  // never race a newer one within the same activation.
-  if (state.loading) return;
+  // A fresh generation for this specific request — captured below and
+  // compared again once the response arrives, so a response is only ever
+  // applied if no newer load (a later criteria change, pager click, or
+  // refresh) has started since. Deliberately does NOT refuse to start
+  // while state.loading is already true: unlike the refresh button and the
+  // pager (which each guard against redundant clicks themselves — see
+  // wireControls/wirePager), a filter/search change must always be able to
+  // supersede an in-flight request for the previous criteria, not be
+  // silently dropped by it.
+  state.loadGeneration += 1;
+  const generation = state.loadGeneration;
 
   state.loading = true;
   // A fresh attempt supersedes any previous error — if it also ends in an
@@ -593,15 +695,32 @@ async function loadApplications(
   state.hasLoadError = false;
   setStatusMessage(container, state, 'Загружаем заявки…');
   setRefreshDisabled(container, true);
+  renderPager(container, state);
+
+  function isStillTheCurrentLoad(): boolean {
+    return generation === state.loadGeneration && isStillCurrent(activationId);
+  }
 
   try {
-    const response = await api.getPrioritizedApplications(0, 100);
-    if (!isStillCurrent(activationId)) return;
+    const response = await api.getPrioritizedApplications(
+      state.skip,
+      APPLICATIONS_PAGE_SIZE,
+      buildPrioritizedQuery(state.filterLevel, state.searchQuery),
+    );
+    if (!isStillTheCurrentLoad()) return;
     state.items = response.items;
+    // Reflects exactly what this response says, including `skip` — a
+    // Prev/Next click already set state.skip before this call started (see
+    // wirePager), but this keeps state.skip authoritative from the
+    // backend's own echo rather than trusting the locally-computed value if
+    // the two were ever to disagree.
+    state.skip = response.skip;
+    state.total = response.total;
     state.loading = false;
     renderList(container, state);
+    renderPager(container, state);
   } catch (error) {
-    if (!isStillCurrent(activationId)) return;
+    if (!isStillTheCurrentLoad()) return;
     state.loading = false;
     if (isUnauthorizedError(error)) {
       host.onSessionExpired();
@@ -616,8 +735,9 @@ async function loadApplications(
       state,
       'Не удалось загрузить заявки. Нажмите «Обновить», чтобы попробовать снова.',
     );
+    renderPager(container, state);
   } finally {
-    if (isStillCurrent(activationId)) {
+    if (isStillTheCurrentLoad()) {
       setRefreshDisabled(container, false);
     }
   }
@@ -705,12 +825,60 @@ function wireListDelegation(
     // never via backend-supplied application.id — so a malformed/hostile
     // id can never end up driving a lookup, let alone the DOM.
     const index = Number(button.dataset.index);
-    if (!Number.isInteger(index) || index < 0 || index >= state.visibleItems.length) return;
-    const item = state.visibleItems[index];
+    if (!Number.isInteger(index) || index < 0 || index >= state.items.length) return;
+    const item = state.items[index];
     if (!item) return;
 
     openModal(container, state, host, item, button);
   });
+}
+
+/**
+ * Prev/Next clicks — delegated on the pager's static container (like
+ * wireListDelegation above), since renderPager replaces its innerHTML on
+ * every load and a listener bound directly to a button would be discarded
+ * along with it. Ignored while a load is already in flight, or once the
+ * clicked direction is no longer available (state.total may have changed
+ * since the buttons were last rendered - e.g. a concurrent admin deleted a
+ * row - so this re-checks the boundary itself rather than trusting the
+ * (possibly now-stale) disabled attribute alone).
+ */
+function wirePager(
+  container: HTMLElement,
+  state: ApplicationsState,
+  isInteractive: () => boolean,
+  requestReload: () => void,
+): void {
+  const pagerEl = container.querySelector<HTMLElement>('#applications-pager');
+  if (!pagerEl) return;
+
+  pagerEl.addEventListener('click', (event) => {
+    if (!isInteractive() || state.loading) return;
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+
+    if (target.closest('#applications-prev')) {
+      if (state.skip <= 0) return;
+      state.skip = Math.max(0, state.skip - APPLICATIONS_PAGE_SIZE);
+      requestReload();
+    } else if (target.closest('#applications-next')) {
+      if (state.total === null || state.skip + state.items.length >= state.total) return;
+      state.skip += APPLICATIONS_PAGE_SIZE;
+      requestReload();
+    }
+  });
+}
+
+/** Clears any pending search-debounce timer without firing it — used
+ * whenever a criteria change is about to trigger its own immediate reload
+ * (so a stale debounced reload can't also fire moments later) and on
+ * deactivate()/dispose() (so one can never fire once the tab is hidden or
+ * the mount is gone). */
+function clearSearchDebounce(state: ApplicationsState): void {
+  if (state.searchDebounceTimer !== undefined) {
+    clearTimeout(state.searchDebounceTimer);
+    state.searchDebounceTimer = undefined;
+  }
 }
 
 function wireControls(
@@ -720,15 +888,28 @@ function wireControls(
   isInteractive: () => boolean,
   requestReload: () => void,
 ): void {
+  /** Shared by both criteria: back to the first page, then reload — used
+   * directly by the (undebounced) priority chips, and by the search input
+   * after its debounce timer fires. */
+  function requestFilteredReload(): void {
+    state.skip = 0;
+    requestReload();
+  }
+
   const filterButtons = container.querySelectorAll<HTMLButtonElement>('.filter-chip');
   filterButtons.forEach((button) => {
     button.addEventListener('click', () => {
       if (!isInteractive()) return;
       const level = button.dataset.filter as FilterLevel | undefined;
-      if (!level) return;
+      if (!level || level === state.filterLevel) return;
       state.filterLevel = level;
       filterButtons.forEach((btn) => btn.setAttribute('aria-pressed', String(btn === button)));
-      renderList(container, state);
+      // A priority chip is a single discrete click, not rapid-fire typing —
+      // no debounce, and any pending debounced search reload is superseded
+      // by this one (both criteria are always sent together, see
+      // buildPrioritizedQuery).
+      clearSearchDebounce(state);
+      requestFilteredReload();
     });
   });
 
@@ -736,16 +917,27 @@ function wireControls(
   searchInput?.addEventListener('input', () => {
     if (!isInteractive()) return;
     state.searchQuery = searchInput.value;
-    renderList(container, state);
+    clearSearchDebounce(state);
+    state.searchDebounceTimer = setTimeout(() => {
+      state.searchDebounceTimer = undefined;
+      if (!isInteractive()) return;
+      requestFilteredReload();
+    }, SEARCH_DEBOUNCE_MS);
   });
 
   const refreshButton = container.querySelector<HTMLButtonElement>('#applications-refresh');
   refreshButton?.addEventListener('click', () => {
-    if (!isInteractive()) return;
+    // Explicit state.loading dedup (unlike a filter/search change, which
+    // must always supersede an in-flight load — see loadApplications):
+    // rapid repeat clicks on the same button while a request is already in
+    // flight for the exact same criteria/page should not each queue their
+    // own redundant request.
+    if (!isInteractive() || state.loading) return;
     requestReload();
   });
 
   wireListDelegation(container, state, host, isInteractive);
+  wirePager(container, state, isInteractive, requestReload);
   wireModal(container, state);
 }
 
@@ -777,7 +969,8 @@ export function mountAdminApplications(
   const mountId = beginAppsRender();
   const state: ApplicationsState = {
     items: [],
-    visibleItems: [],
+    skip: 0,
+    total: null,
     filterLevel: 'all',
     searchQuery: '',
     loading: false,
@@ -785,6 +978,8 @@ export function mountAdminApplications(
     lastFocusedTrigger: null,
     modalGeneration: 0,
     modalAnalyticsLoading: false,
+    loadGeneration: 0,
+    searchDebounceTimer: undefined,
   };
 
   let tabActive = false;
@@ -807,6 +1002,11 @@ export function mountAdminApplications(
     tabActive = true;
     currentActivationId += 1;
     const activationId = currentActivationId;
+    // Every (re-)activation starts back at the first page - mirrors the
+    // pre-Stage-4 behavior of always requesting skip=0, and avoids showing
+    // a Prev/Next state left over from whatever page the admin was on the
+    // last time this tab was active.
+    state.skip = 0;
     void loadApplications(container, host, state, activationId, isStillCurrent);
   }
 
@@ -814,6 +1014,7 @@ export function mountAdminApplications(
     tabActive = false;
     currentActivationId += 1;
     state.loading = false;
+    clearSearchDebounce(state);
     closeModal(container, state, { restoreFocus: false });
   }
 
@@ -821,6 +1022,7 @@ export function mountAdminApplications(
     tabActive = false;
     currentActivationId += 1;
     state.loading = false;
+    clearSearchDebounce(state);
     closeModal(container, state, { restoreFocus: false });
   }
 

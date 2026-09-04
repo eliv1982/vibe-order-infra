@@ -361,6 +361,20 @@ def _priority_level(score: int) -> PriorityLevel:
     return "low"
 
 
+def priority_score_bounds(level: PriorityLevel) -> tuple[int, int]:
+    """Inclusive [min, max] priority_score range for `level` - the single
+    source of truth for the score bands _priority_level() above already
+    encodes, so a priority-level filter query (see
+    app/crud/application.py::get_prioritized_applications_page) can never
+    drift out of sync with what the score->level mapping (and thus the API/
+    frontend badge for that same row) actually says."""
+    if level == "hot":
+        return (_HOT_THRESHOLD, _MAX_SCORE)
+    if level == "medium":
+        return (_MEDIUM_THRESHOLD, _HOT_THRESHOLD - 1)
+    return (_MIN_SCORE, _MEDIUM_THRESHOLD - 1)
+
+
 def _recommend_team(*, fleet_scope: bool, fleet_size: bool, niche: str, role: str, task_type: str) -> str:
     # Fleet has the highest priority: it must win even when the niche is
     # also one of _CORPORATE_NICHES (e.g. "автопарк компании" itself is a

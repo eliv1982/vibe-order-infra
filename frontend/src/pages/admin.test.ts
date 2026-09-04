@@ -640,7 +640,7 @@ describe('section tabs (Услуги / Заявки / Статистика)', ()
     expect(root.querySelector('#admin-tab-applications')!.getAttribute('aria-selected')).toBe(
       'true',
     );
-    await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledWith(0, 100));
+    await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledWith(0, 100, {}));
     expect(api.getAnalyticsOverview).not.toHaveBeenCalled();
   });
 

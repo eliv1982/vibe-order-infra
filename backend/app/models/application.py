@@ -4,10 +4,11 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, Numeric, String, Text, event, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db_base import Base
+from app.services.application_scoring import score_application
 
 if TYPE_CHECKING:
     from app.models.behavior_metric import BehaviorMetric
@@ -63,9 +64,24 @@ class Application(Base):
     point at and no deterministic way to infer one from their free-text
     interested_product alone. ApplicationRead.service_id is therefore also
     Optional, so those historical rows keep reading back correctly.
+
+    priority_score (Stage 4): a materialized, always-in-sync copy of
+    app.services.application_scoring.score_application(self).score,
+    maintained by the _sync_priority_score mapper event below on every
+    insert/update - never set directly by application code. Exists purely so
+    GET /applications/prioritized (app/routes/applications.py) can ORDER BY
+    + OFFSET/LIMIT this column in SQL instead of loading every row into
+    Python to score and sort it there on every request (the Stage 4 fix for
+    that scalability defect - see backend/alembic/versions/
+    0004_stage4_priority_score.py for the one-time backfill of historical
+    rows). The full per-item breakdown (reasons, recommended_action, ...)
+    still comes from calling score_application() directly on the handful of
+    rows in the requested page - this column only carries the sortable
+    number, not the explanation.
     """
 
     __tablename__ = "applications"
+    __table_args__ = (Index("ix_applications_priority_score", "priority_score"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     first_name: Mapped[str] = mapped_column(String(100))
@@ -91,6 +107,17 @@ class Application(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+    # server_default="0" (unlike every other non-key/timestamp column on this
+    # model - see this column's docstring above) is a deliberate NOT NULL
+    # safety net for a row inserted by something other than this
+    # application's own ORM (raw SQL against the runtime role, a legacy/
+    # maintenance script, ...) - the _sync_priority_score event below is what
+    # actually keeps this column meaningful for every insert/update that
+    # *does* go through this ORM, which is every real write path
+    # (app/crud/application.py). See backend/alembic/versions/
+    # 0004_stage4_priority_score.py's matching server_default on ADD COLUMN -
+    # they must not drift apart (see tests/test_migrations_drift.py).
+    priority_score: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
     behavior_metric: Mapped["BehaviorMetric | None"] = relationship(
         back_populates="application",
@@ -98,3 +125,16 @@ class Application(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+
+
+@event.listens_for(Application, "before_insert")
+@event.listens_for(Application, "before_update")
+def _sync_priority_score(mapper: object, connection: object, target: Application) -> None:
+    """Keep target.priority_score equal to score_application(target).score
+    for every insert/update, regardless of call site (crud/application.py,
+    a direct ORM insert in a test/maintenance script, ...) - see
+    priority_score's docstring above. Runs inside the flush that is about to
+    emit the INSERT/UPDATE, so this attribute assignment is itself included
+    in that statement (standard SQLAlchemy before_insert/before_update
+    recipe for a derived column - see the ORM Events documentation)."""
+    target.priority_score = score_application(target).score

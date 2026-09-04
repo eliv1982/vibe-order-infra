@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -15,6 +15,7 @@ from app.models.admin_setting import AdminSetting
 from app.models.application import Application
 from app.models.application_idempotency_key import ApplicationIdempotencyKey
 from app.schemas.application import ApplicationCreate, ApplicationUpdate
+from app.services.application_scoring import PriorityLevel, priority_score_bounds
 
 # NUMERIC(12, 2) scale actually stored for Application.budget (see
 # app/models/application.py) - the canonical precision every accepted
@@ -280,16 +281,117 @@ def get_applications(db: Session, skip: int = 0, limit: int = 100) -> list[Appli
     return list(db.scalars(stmt).all())
 
 
-def get_all_applications(db: Session) -> list[Application]:
-    """Fetch every application, unpaginated.
+# Search fields (Stage 4 correction): exactly the haystack the admin panel's
+# search box previously matched client-side, in JavaScript, against only
+# whatever page happened to already be loaded (frontend/src/pages/
+# adminApplications.ts's now-removed matchesSearch) - moved here verbatim so
+# the *meaning* of a search query does not change, only where it runs.
+_SEARCH_COLUMNS: tuple[str, ...] = (
+    "first_name",
+    "last_name",
+    "contact_data",
+    "interested_product",
+    "business_info",
+)
 
-    Used for prioritized listing: scoring and sorting must run over the
-    whole set before skip/limit are applied (see routes/applications.py).
-    Fine for this stage's small dataset; a larger one would need DB-level
-    materialized scoring or a different pagination strategy.
+# The character PostgreSQL is told (via the ILIKE ... ESCAPE clause below) to
+# treat as an escape prefix - never anything user-supplied, so a search query
+# can never redefine it.
+_LIKE_ESCAPE_CHAR = "\\"
+
+
+def _escape_like_wildcards(value: str) -> str:
+    """Makes `value` safe to embed inside a `%...%` ILIKE pattern as a
+    literal substring: a search for e.g. "50%" or "a_b" must match those
+    exact characters, not PostgreSQL's LIKE wildcards - so any `%`, `_` or
+    literal backslash the admin typed is escaped first (backslash doubled
+    before the other two, so an already-escaped sequence in the input can't
+    be reinterpreted). Paired with `.ilike(pattern, escape=_LIKE_ESCAPE_CHAR)`
+    at every call site below."""
+    return (
+        value.replace(_LIKE_ESCAPE_CHAR, _LIKE_ESCAPE_CHAR * 2)
+        .replace("%", f"{_LIKE_ESCAPE_CHAR}%")
+        .replace("_", f"{_LIKE_ESCAPE_CHAR}_")
+    )
+
+
+def _prioritized_filters(
+    search: str | None, priority: PriorityLevel | None
+) -> list[ColumnElement[bool]]:
+    """WHERE-clause fragments shared by get_prioritized_applications_page's
+    COUNT and page queries, so both are always computed against the exact
+    same filtered corpus (see that function's docstring). Returns an empty
+    list - a no-op when applied via `.where(*filters)` - when neither
+    criterion is active."""
+    filters: list[ColumnElement[bool]] = []
+
+    normalized_search = (search or "").strip()
+    if normalized_search:
+        pattern = f"%{_escape_like_wildcards(normalized_search)}%"
+        filters.append(
+            or_(
+                *(
+                    getattr(Application, column).ilike(pattern, escape=_LIKE_ESCAPE_CHAR)
+                    for column in _SEARCH_COLUMNS
+                )
+            )
+        )
+
+    if priority is not None:
+        low, high = priority_score_bounds(priority)
+        filters.append(Application.priority_score.between(low, high))
+
+    return filters
+
+
+def get_prioritized_applications_page(
+    db: Session,
+    skip: int,
+    limit: int,
+    search: str | None = None,
+    priority: PriorityLevel | None = None,
+) -> tuple[list[Application], int]:
+    """One page of applications, ordered by the materialized priority_score
+    (descending), then created_at (ascending), then id (ascending) as a
+    deterministic tie-break - exactly the order routes/applications.py used
+    to compute in Python over the *entire* table on every request (see
+    Application.priority_score's docstring in app/models/application.py for
+    how that column is kept in sync). Ordering, OFFSET and LIMIT all happen
+    in PostgreSQL: this only ever hydrates the `limit` rows actually
+    returned, never the whole applications table.
+
+    `search`/`priority` (Stage 4 correction): optional server-side criteria
+    - see _prioritized_filters above for exactly what each matches. Applied
+    identically to both the COUNT and the row query below, and *before*
+    OFFSET/LIMIT, so `total` and every page's rows always describe the same
+    filtered corpus - never the unfiltered table with only the current page
+    narrowed down client-side (the defect this correction fixes: search/
+    priority used to filter whatever 100-row page was already loaded in the
+    browser, so a match that existed only on a later page was invisible from
+    page 1, and a genuinely page-1-empty search result was indistinguishable
+    from a corpus-wide one).
+
+    Returns (page, total) - `total` is the filtered row count (a single
+    SELECT COUNT(*) over the same WHERE clause, independent of skip/limit)
+    so callers can build pagination metadata (see PrioritizedApplicationList)
+    without a second unpaginated fetch.
     """
-    stmt = select(Application).order_by(Application.id)
-    return list(db.scalars(stmt).all())
+    filters = _prioritized_filters(search, priority)
+
+    total = db.scalar(select(func.count()).select_from(Application).where(*filters)) or 0
+    stmt = (
+        select(Application)
+        .where(*filters)
+        .order_by(
+            Application.priority_score.desc(),
+            Application.created_at.asc(),
+            Application.id.asc(),
+        )
+        .offset(skip)
+        .limit(limit)
+    )
+    items = list(db.scalars(stmt).all())
+    return items, total
 
 
 def get_applications_created_between(

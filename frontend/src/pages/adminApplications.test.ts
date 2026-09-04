@@ -10,10 +10,11 @@ import type {
 import { formatBudget } from '../utils/format';
 import { formatAnalyticsDateTime } from './adminAnalytics';
 import {
-  filterApplications,
+  buildPrioritizedQuery,
   formatApplicationBudget,
   formatApplicationDate,
   fullName,
+  hasActiveCriteria,
   isKnownPriorityLevel,
   mountAdminApplications,
   normalizePriorityScore,
@@ -97,6 +98,16 @@ function makeUnsafeItem(overrides: Record<string, unknown>): ApplicationPriority
 
 function makeList(items: ApplicationPriorityRead[]): PrioritizedApplicationList {
   return { items, total: items.length, skip: 0, limit: 100 };
+}
+
+/** Like makeList, but for a page that is part of a larger total - the shape
+ * a real multi-page GET /applications/prioritized response has (see
+ * PrioritizedApplicationList, api/types.ts). */
+function makeListPage(
+  items: ApplicationPriorityRead[],
+  overrides: Partial<Pick<PrioritizedApplicationList, 'total' | 'skip'>> = {},
+): PrioritizedApplicationList {
+  return { items, total: items.length, skip: 0, limit: 100, ...overrides };
 }
 
 function makeAnalyticsDetail(overrides: Partial<ApplicationBehaviorAnalytics> = {}): ApplicationBehaviorAnalytics {
@@ -187,7 +198,7 @@ describe('loading applications', () => {
     const container = document.createElement('div');
     mountAndActivate(container, makeHost());
 
-    await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledWith(0, 100));
+    await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledWith(0, 100, {}));
   });
 
   it('a 401 calls host.onSessionExpired instead of rendering an error banner', async () => {
@@ -210,6 +221,113 @@ describe('loading applications', () => {
 
     await vi.waitFor(() => expect(container.textContent).toContain('Не удалось загрузить'));
     expect(onSessionExpired).not.toHaveBeenCalled();
+  });
+});
+
+// --- Pagination ------------------------------------------------------------
+// Stage 4: the admin panel used to always request skip=0/limit=100 and
+// never let the admin reach anything beyond the first 100 applications,
+// even though the backend already returned enough (skip/total/limit) to
+// page through the rest. These tests exercise the Prev/Next controls added
+// for that (see renderPager/wirePager in adminApplications.ts).
+
+describe('pagination', () => {
+  it('shows the current range and total once a page loads', async () => {
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValue(
+      makeListPage([makeItem()], { total: 250, skip: 0 }),
+    );
+    const container = document.createElement('div');
+    mountAndActivate(container, makeHost());
+
+    await vi.waitFor(() => expect(container.textContent).toContain('Заявки 1–1 из 250'));
+  });
+
+  it('disables "Назад" on the first page and enables "Далее" when more rows remain', async () => {
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValue(
+      makeListPage(Array.from({ length: 100 }, () => makeItem()), { total: 250, skip: 0 }),
+    );
+    const container = document.createElement('div');
+    mountAndActivate(container, makeHost());
+
+    await vi.waitFor(() => expect(container.textContent).toContain('Заявки 1–100 из 250'));
+    expect(container.querySelector<HTMLButtonElement>('#applications-prev')!.disabled).toBe(true);
+    expect(container.querySelector<HTMLButtonElement>('#applications-next')!.disabled).toBe(false);
+  });
+
+  it('disables both Prev and Next when every row already fits on one page', async () => {
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValue(makeList([makeItem(), makeItem()]));
+    const container = document.createElement('div');
+    mountAndActivate(container, makeHost());
+
+    await vi.waitFor(() => expect(container.textContent).toContain('Заявки 1–2 из 2'));
+    expect(container.querySelector<HTMLButtonElement>('#applications-prev')!.disabled).toBe(true);
+    expect(container.querySelector<HTMLButtonElement>('#applications-next')!.disabled).toBe(true);
+  });
+
+  it('clicking "Далее" requests the next page with skip advanced by the page size', async () => {
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValue(
+      makeListPage(Array.from({ length: 100 }, () => makeItem()), { total: 250, skip: 0 }),
+    );
+    const container = document.createElement('div');
+    mountAndActivate(container, makeHost());
+    await vi.waitFor(() => expect(container.textContent).toContain('Заявки 1–100 из 250'));
+
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValue(
+      makeListPage(Array.from({ length: 100 }, () => makeItem()), { total: 250, skip: 100 }),
+    );
+    container.querySelector<HTMLButtonElement>('#applications-next')!.click();
+
+    await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenLastCalledWith(100, 100, {}));
+    await vi.waitFor(() => expect(container.textContent).toContain('Заявки 101–200 из 250'));
+    expect(container.querySelector<HTMLButtonElement>('#applications-prev')!.disabled).toBe(false);
+  });
+
+  it('clicking "Назад" from the second page returns to skip=0', async () => {
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValue(
+      makeListPage(Array.from({ length: 100 }, () => makeItem()), { total: 250, skip: 100 }),
+    );
+    const container = document.createElement('div');
+    mountAndActivate(container, makeHost());
+    await vi.waitFor(() => expect(container.textContent).toContain('из 250'));
+
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValue(
+      makeListPage(Array.from({ length: 100 }, () => makeItem()), { total: 250, skip: 0 }),
+    );
+    container.querySelector<HTMLButtonElement>('#applications-prev')!.click();
+
+    await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenLastCalledWith(0, 100, {}));
+  });
+
+  it('the pager is hidden while a page is loading', async () => {
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValue(
+      makeListPage(Array.from({ length: 100 }, () => makeItem()), { total: 250, skip: 0 }),
+    );
+    const container = document.createElement('div');
+    mountAndActivate(container, makeHost());
+    await vi.waitFor(() => expect(container.textContent).toContain('из 250'));
+
+    vi.mocked(api.getPrioritizedApplications).mockReturnValue(new Promise(() => {}));
+    container.querySelector<HTMLButtonElement>('#applications-next')!.click();
+
+    await vi.waitFor(() => expect(container.textContent).not.toContain('из 250'));
+  });
+
+  it('re-activating the tab (switching back to "Заявки") returns to the first page', async () => {
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValue(
+      makeListPage(Array.from({ length: 100 }, () => makeItem()), { total: 250, skip: 100 }),
+    );
+    const container = document.createElement('div');
+    const controller = mountAndActivate(container, makeHost());
+    await vi.waitFor(() => expect(container.textContent).toContain('из 250'));
+
+    controller.deactivate();
+    vi.mocked(api.getPrioritizedApplications).mockClear();
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValue(
+      makeListPage(Array.from({ length: 100 }, () => makeItem()), { total: 250, skip: 0 }),
+    );
+    controller.activate();
+
+    await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledWith(0, 100, {}));
   });
 });
 
@@ -365,36 +483,47 @@ describe('rendering', () => {
   });
 });
 
-// --- Filtering -------------------------------------------------------------
+// --- Filtering ---------------------------------------------------------
+// Stage 4 correction: search/priority are no longer filtered client-side
+// against whichever page happened to already be loaded (the independently
+// audited defect - a match on a later backend page was invisible from page
+// 1, and a real corpus-wide zero was indistinguishable from that). Both
+// criteria are now sent to the backend as query params on every
+// GET /applications/prioritized call (see buildPrioritizedQuery), and
+// `state.items` is rendered as-is - whatever the backend already filtered
+// and paginated.
 
-describe('filterApplications (pure)', () => {
-  it('preserves the original backend order within a level filter', () => {
-    const items = [
-      makeItem({ application: makeApplication({ id: 1 }), priority_level: 'hot' }),
-      makeItem({ application: makeApplication({ id: 2 }), priority_level: 'medium' }),
-      makeItem({ application: makeApplication({ id: 3 }), priority_level: 'hot' }),
-    ];
-    const result = filterApplications(items, 'hot', '');
-    expect(result.map((item) => item.application.id)).toEqual([1, 3]);
+/** Longer than adminApplications.ts's internal SEARCH_DEBOUNCE_MS (350ms,
+ * not exported) - real timers, matching this file's existing async style
+ * (see `flush` above), rather than introducing fake timers just for this
+ * describe block. */
+async function waitForSearchDebounce(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 400));
+}
+
+describe('buildPrioritizedQuery / hasActiveCriteria (pure)', () => {
+  it('omits both params when there is no active criterion', () => {
+    expect(buildPrioritizedQuery('all', '')).toEqual({});
+    expect(buildPrioritizedQuery('all', '   ')).toEqual({});
+    expect(hasActiveCriteria('all', '')).toBe(false);
+    expect(hasActiveCriteria('all', '   ')).toBe(false);
   });
 
-  it('filters by free-text search across name/contact/service/vehicle info', () => {
-    const items = [
-      makeItem({ application: makeApplication({ id: 1, first_name: 'Анна', last_name: 'Смирнова' }) }),
-      makeItem({ application: makeApplication({ id: 2, first_name: 'Борис', last_name: 'Кузнецов' }) }),
-    ];
-    const result = filterApplications(items, 'all', 'смирнова');
-    expect(result.map((item) => item.application.id)).toEqual([1]);
+  it('sends a trimmed search and no priority when only search is active', () => {
+    expect(buildPrioritizedQuery('all', '  Смирнова  ')).toEqual({ search: 'Смирнова' });
+    expect(hasActiveCriteria('all', '  Смирнова  ')).toBe(true);
   });
 
-  it('is case-insensitive and trims the query', () => {
-    const items = [makeItem({ application: makeApplication({ id: 1, interested_product: 'Химчистка салона' }) })];
-    expect(filterApplications(items, 'all', '  ХИМЧИСТКА  ').map((i) => i.application.id)).toEqual([1]);
+  it('sends a priority level and no search when only a chip is active', () => {
+    expect(buildPrioritizedQuery('hot', '')).toEqual({ priority: 'hot' });
+    expect(hasActiveCriteria('hot', '')).toBe(true);
   });
 
-  it('returns an empty array when nothing matches', () => {
-    const items = [makeItem()];
-    expect(filterApplications(items, 'all', 'совершенно несуществующий запрос')).toEqual([]);
+  it('sends both when search and a priority chip are both active', () => {
+    expect(buildPrioritizedQuery('medium', 'Кузнецов')).toEqual({
+      search: 'Кузнецов',
+      priority: 'medium',
+    });
   });
 });
 
@@ -414,60 +543,218 @@ describe('filtering — DOM', () => {
     expect(container.textContent).not.toContain('Средние');
   });
 
-  it('clicking a level filter chip shows only matching cards', async () => {
-    const items = [
-      makeItem({ application: makeApplication({ id: 1 }), priority_level: 'hot', priority_label: 'Горячая' }),
-      makeItem({
-        application: makeApplication({ id: 2 }),
-        priority_level: 'low',
-        priority_label: 'Низкая',
-      }),
-    ];
-    vi.mocked(api.getPrioritizedApplications).mockResolvedValue(makeList(items));
+  it('clicking a priority chip resets to the first page and sends priority to the backend', async () => {
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValueOnce(
+      makeListPage(Array.from({ length: 100 }, () => makeItem()), { total: 250, skip: 100 }),
+    );
     const container = document.createElement('div');
     mountAndActivate(container, makeHost());
-    await vi.waitFor(() => expect(container.querySelectorAll('.application-card').length).toBe(2));
+    await vi.waitFor(() => expect(container.textContent).toContain('из 250'));
+    // Not on the first page any more (skip=100) - the chip click below must
+    // still reset to skip=0, not just narrow whatever page is currently shown.
+    container.querySelector<HTMLButtonElement>('#applications-next')!.click();
+    await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledTimes(2));
 
+    const hotItems = [
+      makeItem({ application: makeApplication({ id: 1 }), priority_level: 'hot' }),
+    ];
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValueOnce(makeList(hotItems));
     container.querySelector<HTMLButtonElement>('[data-filter="hot"]')!.click();
 
-    const cards = container.querySelectorAll<HTMLElement>('.application-card');
-    expect(cards.length).toBe(1);
-    expect(cards[0].textContent).toContain('Высокий');
+    await vi.waitFor(() =>
+      expect(api.getPrioritizedApplications).toHaveBeenLastCalledWith(0, 100, { priority: 'hot' }),
+    );
+    await vi.waitFor(() => expect(container.querySelectorAll('.application-card').length).toBe(1));
   });
 
-  it('typing in the search box filters the visible list', async () => {
-    const items = [
-      makeItem({ application: makeApplication({ id: 1, first_name: 'Анна' }) }),
-      makeItem({ application: makeApplication({ id: 2, first_name: 'Борис' }) }),
-    ];
-    vi.mocked(api.getPrioritizedApplications).mockResolvedValue(makeList(items));
+  it('clicking an already-active chip does not send a redundant request', async () => {
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValue(makeList([]));
     const container = document.createElement('div');
     mountAndActivate(container, makeHost());
-    await vi.waitFor(() => expect(container.querySelectorAll('.application-card').length).toBe(2));
+    await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledTimes(1));
 
+    container.querySelector<HTMLButtonElement>('[data-filter="all"]')!.click();
+    await flush();
+    expect(api.getPrioritizedApplications).toHaveBeenCalledTimes(1);
+  });
+
+  it('typing in the search box debounces, resets to the first page, and sends search to the backend', async () => {
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValueOnce(
+      makeListPage(Array.from({ length: 100 }, () => makeItem()), { total: 250, skip: 100 }),
+    );
+    const container = document.createElement('div');
+    mountAndActivate(container, makeHost());
+    await vi.waitFor(() => expect(container.textContent).toContain('из 250'));
+    container.querySelector<HTMLButtonElement>('#applications-next')!.click();
+    await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledTimes(2));
+
+    const matches = [makeItem({ application: makeApplication({ id: 1, first_name: 'Анна' }) })];
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValueOnce(makeList(matches));
     const searchInput = container.querySelector<HTMLInputElement>('#applications-search')!;
     searchInput.value = 'Анна';
     searchInput.dispatchEvent(new Event('input', { bubbles: true }));
 
-    const cards = container.querySelectorAll<HTMLElement>('.application-card');
-    expect(cards.length).toBe(1);
-    expect(cards[0].textContent).toContain('Анна');
+    // No request yet - still debouncing.
+    expect(api.getPrioritizedApplications).toHaveBeenCalledTimes(2);
+
+    await waitForSearchDebounce();
+
+    expect(api.getPrioritizedApplications).toHaveBeenLastCalledWith(0, 100, { search: 'Анна' });
+    await vi.waitFor(() => expect(container.querySelectorAll('.application-card').length).toBe(1));
   });
 
-  it('shows a distinct empty-search-result state and a found count otherwise', async () => {
+  it('rapid typing sends exactly one debounced request, carrying only the final value', async () => {
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValue(makeList([]));
+    const container = document.createElement('div');
+    mountAndActivate(container, makeHost());
+    await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledTimes(1));
+
+    const searchInput = container.querySelector<HTMLInputElement>('#applications-search')!;
+    for (const value of ['А', 'Ан', 'Анн', 'Анна']) {
+      searchInput.value = value;
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    await waitForSearchDebounce();
+
+    expect(api.getPrioritizedApplications).toHaveBeenCalledTimes(2); // mount + exactly one debounced call
+    expect(api.getPrioritizedApplications).toHaveBeenLastCalledWith(0, 100, { search: 'Анна' });
+  });
+
+  it('sends both search and priority together once both are set', async () => {
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValue(makeList([]));
+    const container = document.createElement('div');
+    mountAndActivate(container, makeHost());
+    await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledTimes(1));
+
+    container.querySelector<HTMLButtonElement>('[data-filter="medium"]')!.click();
+    await vi.waitFor(() =>
+      expect(api.getPrioritizedApplications).toHaveBeenLastCalledWith(0, 100, { priority: 'medium' }),
+    );
+
+    const searchInput = container.querySelector<HTMLInputElement>('#applications-search')!;
+    searchInput.value = 'Кузнецов';
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await waitForSearchDebounce();
+
+    expect(api.getPrioritizedApplications).toHaveBeenLastCalledWith(0, 100, {
+      search: 'Кузнецов',
+      priority: 'medium',
+    });
+  });
+
+  it('a slower response for an older search value never overwrites a newer one', async () => {
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValueOnce(makeList([]));
+    const container = document.createElement('div');
+    mountAndActivate(container, makeHost());
+    await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledTimes(1));
+
+    const staleDeferred = createDeferred<PrioritizedApplicationList>();
+    vi.mocked(api.getPrioritizedApplications).mockReturnValueOnce(staleDeferred.promise);
+    const searchInput = container.querySelector<HTMLInputElement>('#applications-search')!;
+    searchInput.value = 'Старый';
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await waitForSearchDebounce();
+    await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledTimes(2));
+
+    // A second, newer search fires (and resolves) before the stale one does.
+    const freshItems = [makeItem({ application: makeApplication({ id: 9, first_name: 'Новый' }) })];
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValueOnce(makeList(freshItems));
+    searchInput.value = 'Новый';
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await waitForSearchDebounce();
+    await vi.waitFor(() => expect(container.querySelectorAll('.application-card').length).toBe(1));
+    expect(container.textContent).toContain('Новый');
+
+    // The stale "Старый" response now arrives late - must not replace the
+    // already-rendered "Новый" result.
+    staleDeferred.resolve(
+      makeList([makeItem({ application: makeApplication({ id: 1, first_name: 'НеДолжноПоявиться' }) })]),
+    );
+    await flush();
+
+    expect(container.textContent).toContain('Новый');
+    expect(container.textContent).not.toContain('НеДолжноПоявиться');
+  });
+
+  it('empty state is "Ничего не найдено" only when the backend reports a genuine zero for active criteria', async () => {
     const items = [makeItem({ application: makeApplication({ id: 1, first_name: 'Анна' }) })];
-    vi.mocked(api.getPrioritizedApplications).mockResolvedValue(makeList(items));
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValueOnce(makeList(items));
     const container = document.createElement('div');
     mountAndActivate(container, makeHost());
     await vi.waitFor(() => expect(container.querySelectorAll('.application-card').length).toBe(1));
-    expect(container.textContent).toContain('Найдено: 1 из 1');
+    expect(container.textContent).not.toContain('Ничего не найдено');
 
+    // Backend reports zero matches for the active search - never a locally
+    // computed "no card on this page" result.
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValueOnce(
+      makeListPage([], { total: 0, skip: 0 }),
+    );
     const searchInput = container.querySelector<HTMLInputElement>('#applications-search')!;
     searchInput.value = 'нет такого клиента';
     searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await waitForSearchDebounce();
 
-    expect(container.querySelectorAll('.application-card').length).toBe(0);
+    await vi.waitFor(() => expect(container.querySelectorAll('.application-card').length).toBe(0));
     expect(container.textContent).toContain('Ничего не найдено');
+    expect(container.textContent).not.toContain('Заявок пока нет');
+  });
+
+  it('"Заявок пока нет" (not "Ничего не найдено") when there is no active criterion and the corpus is empty', async () => {
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValue(makeListPage([], { total: 0, skip: 0 }));
+    const container = document.createElement('div');
+    mountAndActivate(container, makeHost());
+
+    await vi.waitFor(() => expect(container.textContent).toContain('Заявок пока нет'));
+    expect(container.textContent).not.toContain('Ничего не найдено');
+  });
+
+  it('shows the backend-reported filtered total, not a locally-counted subset', async () => {
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValueOnce(makeList([]));
+    const container = document.createElement('div');
+    mountAndActivate(container, makeHost());
+    await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledTimes(1));
+
+    // 17 total matches across the whole (250-row) corpus, only 1 of which
+    // happens to be on this page - the reproduction of the independent
+    // audit's exact scenario (17 matches across 101+ applications).
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValueOnce(
+      makeListPage([makeItem({ application: makeApplication({ id: 1, first_name: 'Виктор' }) })], {
+        total: 17,
+        skip: 0,
+      }),
+    );
+    const searchInput = container.querySelector<HTMLInputElement>('#applications-search')!;
+    searchInput.value = 'Виктор';
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await waitForSearchDebounce();
+
+    await vi.waitFor(() => expect(container.textContent).toContain('Найдено: 17'));
+    expect(container.textContent).toContain('Заявки 1–1 из 17');
+  });
+
+  it('the pager preserves the active search/priority criteria across Next/Prev', async () => {
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValueOnce(makeList([]));
+    const container = document.createElement('div');
+    mountAndActivate(container, makeHost());
+    await vi.waitFor(() => expect(api.getPrioritizedApplications).toHaveBeenCalledTimes(1));
+
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValueOnce(
+      makeListPage(Array.from({ length: 100 }, () => makeItem()), { total: 150, skip: 0 }),
+    );
+    container.querySelector<HTMLButtonElement>('[data-filter="hot"]')!.click();
+    await vi.waitFor(() =>
+      expect(api.getPrioritizedApplications).toHaveBeenLastCalledWith(0, 100, { priority: 'hot' }),
+    );
+
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValueOnce(
+      makeListPage(Array.from({ length: 50 }, () => makeItem()), { total: 150, skip: 100 }),
+    );
+    container.querySelector<HTMLButtonElement>('#applications-next')!.click();
+
+    await vi.waitFor(() =>
+      expect(api.getPrioritizedApplications).toHaveBeenLastCalledWith(100, 100, { priority: 'hot' }),
+    );
   });
 });
 
@@ -1023,81 +1310,62 @@ describe('lifecycle — activate() / deactivate() / dispose()', () => {
 
 // --- Stale dataset guard (filter/search must never resurrect an old set) ---
 
-describe('stale dataset guard — filter/search during a pending or failed refresh', () => {
-  it('pending refresh: changing filter/search while set A is being replaced never resurrects set A, and the change applies only to set B once it arrives', async () => {
-    const setA = [
-      makeItem({ application: makeApplication({ id: 1, first_name: 'Анна' }), priority_level: 'hot' }),
-      makeItem({ application: makeApplication({ id: 2, first_name: 'Борис' }), priority_level: 'low' }),
-    ];
-    // 1. successfully load set A
-    vi.mocked(api.getPrioritizedApplications).mockResolvedValueOnce(makeList(setA));
-    const container = document.createElement('div');
-    mountAndActivate(container, makeHost());
-    await vi.waitFor(() => expect(container.querySelectorAll('.application-card').length).toBe(2));
-
-    // 2. start a refresh with a deferred promise — stays pending
-    const deferred = createDeferred<PrioritizedApplicationList>();
-    vi.mocked(api.getPrioritizedApplications).mockReturnValueOnce(deferred.promise);
-    container.querySelector<HTMLButtonElement>('#applications-refresh')!.click();
-    await vi.waitFor(() => expect(container.textContent).toContain('Загружаем заявки'));
-
-    // 3. change filter and search while the refresh is still pending
-    container.querySelector<HTMLButtonElement>('[data-filter="hot"]')!.click();
-    const searchInput = container.querySelector<HTMLInputElement>('#applications-search')!;
-    searchInput.value = 'виктор';
-    searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-
-    // 4. set A's cards must not reappear
-    expect(container.querySelectorAll('.application-card').length).toBe(0);
-    expect(container.textContent).not.toContain('Анна');
-    expect(container.textContent).not.toContain('Борис');
-
-    // 5. finish the refresh with set B
-    const setB = [
-      makeItem({ application: makeApplication({ id: 3, first_name: 'Виктор' }), priority_level: 'hot' }),
-      makeItem({ application: makeApplication({ id: 4, first_name: 'Галина' }), priority_level: 'medium' }),
-    ];
-    deferred.resolve(makeList(setB));
-    await flush();
-
-    // 6. the filter ('hot') + search ('виктор') set in step 3 apply only to set B
-    const cards = container.querySelectorAll<HTMLElement>('.application-card');
-    expect(cards.length).toBe(1);
-    expect(container.textContent).toContain('Виктор');
-    expect(container.textContent).not.toContain('Галина'); // excluded: not 'hot'
-    expect(container.textContent).not.toContain('Анна');
-    expect(container.textContent).not.toContain('Борис');
-  });
-
-  it('error refresh: a non-401 failure keeps the error state after a filter/search change, and a successful retry shows only the new set', async () => {
+describe('stale dataset guard — a pending request can never overwrite a newer one', () => {
+  it('a pending refresh is superseded by a priority-chip change started before it resolves', async () => {
     const setA = [makeItem({ application: makeApplication({ id: 1, first_name: 'Анна' }) })];
-    // 1. successfully load set A
     vi.mocked(api.getPrioritizedApplications).mockResolvedValueOnce(makeList(setA));
     const container = document.createElement('div');
     mountAndActivate(container, makeHost());
     await vi.waitFor(() => expect(container.querySelectorAll('.application-card').length).toBe(1));
 
-    // 2. a new refresh completes with a non-401 error
+    // A refresh starts and stays pending (a deferred promise, never resolved yet).
+    const staleDeferred = createDeferred<PrioritizedApplicationList>();
+    vi.mocked(api.getPrioritizedApplications).mockReturnValueOnce(staleDeferred.promise);
+    container.querySelector<HTMLButtonElement>('#applications-refresh')!.click();
+    await vi.waitFor(() => expect(container.textContent).toContain('Загружаем заявки'));
+
+    // Before it resolves, a priority-chip click starts a newer load — this
+    // must supersede the pending refresh, not be blocked by it (see
+    // loadApplications's loadGeneration guard).
+    const hotItems = [
+      makeItem({ application: makeApplication({ id: 2, first_name: 'Виктор' }), priority_level: 'hot' }),
+    ];
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValueOnce(makeList(hotItems));
+    container.querySelector<HTMLButtonElement>('[data-filter="hot"]')!.click();
+    await vi.waitFor(() => expect(container.querySelectorAll('.application-card').length).toBe(1));
+    expect(container.textContent).toContain('Виктор');
+
+    // The stale, unfiltered refresh now resolves late — must not overwrite
+    // the newer, filtered result already on screen.
+    staleDeferred.resolve(makeList(setA));
+    await flush();
+
+    expect(container.textContent).toContain('Виктор');
+    expect(container.textContent).not.toContain('Анна');
+  });
+
+  it('error refresh: a non-401 failure keeps the error state until the debounced search reload lands, then a successful result replaces it', async () => {
+    const setA = [makeItem({ application: makeApplication({ id: 1, first_name: 'Анна' }) })];
+    vi.mocked(api.getPrioritizedApplications).mockResolvedValueOnce(makeList(setA));
+    const container = document.createElement('div');
+    mountAndActivate(container, makeHost());
+    await vi.waitFor(() => expect(container.querySelectorAll('.application-card').length).toBe(1));
+
     vi.mocked(api.getPrioritizedApplications).mockRejectedValueOnce(new TypeError('Failed to fetch'));
     container.querySelector<HTMLButtonElement>('#applications-refresh')!.click();
     await vi.waitFor(() => expect(container.textContent).toContain('Не удалось загрузить'));
 
-    // 3. change search after the error
+    // Typing starts a debounce timer — the error state is untouched until
+    // it actually fires a new request.
     const searchInput = container.querySelector<HTMLInputElement>('#applications-search')!;
     searchInput.value = 'виктор';
     searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-
-    // 4. set A's cards must not reappear
-    expect(container.querySelectorAll('.application-card').length).toBe(0);
-    expect(container.textContent).not.toContain('Анна');
-    // 5. the error state remains (not silently replaced by "Заявок пока нет.")
     expect(container.textContent).toContain('Не удалось загрузить');
-    expect(container.textContent).not.toContain('Заявок пока нет');
 
-    // 6. retry with a successful set B shows only B (matching the search set in step 3)
     const setB = [makeItem({ application: makeApplication({ id: 2, first_name: 'Виктор' }) })];
     vi.mocked(api.getPrioritizedApplications).mockResolvedValueOnce(makeList(setB));
-    container.querySelector<HTMLButtonElement>('#applications-refresh')!.click();
+    await waitForSearchDebounce();
+
     await vi.waitFor(() => expect(container.querySelectorAll('.application-card').length).toBe(1));
     expect(container.textContent).toContain('Виктор');
     expect(container.textContent).not.toContain('Анна');
@@ -1165,6 +1433,17 @@ describe('application behavior analytics — modal detail', () => {
     expect(analyticsEl.textContent).toContain('Среднее время одного наведения');
     // Overview-level KPIs (e.g. "applications_count") are never repeated here.
     expect(analyticsEl.textContent).not.toContain('Заявки за период');
+    // Stage 4: return_count is a per-device localStorage visit-counter
+    // snapshot at submission time (see adminAnalytics.ts's matching KPI
+    // group), not a count of returns to this form.
+    expect(analyticsEl.textContent).toContain('Счётчик визитов (устройство)');
+    expect(analyticsEl.textContent).not.toContain('Возвратов к форме');
+    // CSP (Stage 4): the width is applied via the CSSOM (.style.width),
+    // which style-src does not block (unlike a style="" string written
+    // into markup/innerHTML) - see applyBarWidths in adminAnalytics.ts.
+    const fill = analyticsEl.querySelector<HTMLElement>('.analytics-bar-fill')!;
+    expect(fill.style.width).toBe('100%');
+    expect(fill.dataset.barWidth).toBe('100');
   });
 
   it('maps known collector button/section identifiers to Russian labels in the detail modal', async () => {

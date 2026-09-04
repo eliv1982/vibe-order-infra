@@ -3,6 +3,7 @@ import {
   applicationSummaryTemplate,
   homeTemplate,
   isServiceIdInList,
+  privacyNoticeTemplate,
   serviceCardTemplate,
 } from './home';
 import { viewCardTemplate } from './admin';
@@ -113,6 +114,33 @@ describe('applicationSummaryTemplate', () => {
 describe('homeTemplate — public navigation', () => {
   it('never links to /admin from the public client page', () => {
     expect(homeTemplate()).not.toContain('/admin');
+  });
+});
+
+describe('homeTemplate — data-collection disclosure', () => {
+  it('renders the privacy notice before the application summary/form', () => {
+    const html = homeTemplate();
+
+    const noticeIndex = html.indexOf('form-privacy-note');
+    const summaryIndex = html.indexOf('id="application-summary"');
+    expect(noticeIndex).toBeGreaterThan(-1);
+    expect(summaryIndex).toBeGreaterThan(noticeIndex);
+  });
+
+  it('discloses both categories of data actually collected: application fields and behavior metrics', () => {
+    const html = privacyNoticeTemplate();
+
+    // What's actually submitted (see wireApplicationForm/handleSubmit) and
+    // what's actually tracked (see metrics/behaviorMetrics.ts) - never a
+    // stronger claim (e.g. cursor coordinates, form-field contents beyond
+    // the application, third-party analytics) than the code supports.
+    expect(html).toContain('контактные данные');
+    expect(html).toContain('клики по ключевым кнопкам');
+    expect(html).toContain('наведение курсора на разделы формы');
+    expect(html).toContain('счётчик визитов');
+    // Explicitly disclaims collecting something the code genuinely doesn't
+    // (no cursor-coordinate tracking anywhere - see metrics/behaviorMetrics.ts).
+    expect(html).toContain('не записываем');
   });
 });
 

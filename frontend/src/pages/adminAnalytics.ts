@@ -293,13 +293,37 @@ export function buttonAnalyticsListHtml(items: ButtonAnalyticsItem[], emptyMessa
             <span class="analytics-bar-meta">${escapeHtml(count)} · ${escapeHtml(percentText)}</span>
           </div>
           <div class="analytics-bar-track" role="img" aria-label="${escapeHtml(barLabel)}">
-            <div class="analytics-bar-fill" style="width: ${barWidth}%"></div>
+            <div class="analytics-bar-fill" data-bar-width="${barWidth}"></div>
           </div>
         </li>
       `;
     })
     .join('');
   return `<ul class="analytics-bar-list">${rows}</ul>`;
+}
+
+/**
+ * CSP compliance (Stage 4): the bar-fill width used to be an inline
+ * `style="width: N%"` HTML attribute baked into the template strings above
+ * - blocked by a `style-src` without `'unsafe-inline'`. Setting the width
+ * via the CSSOM `.style.width` property instead (as this function does) is
+ * NOT inline-style-attribute markup and is unaffected by that directive, so
+ * the policy can stay 'self'-only. Reads the value back off `data-bar-width`
+ * (set by buttonAnalyticsListHtml/sectionAnalyticsListHtml above) - callers
+ * must invoke this once after replacing `container`'s innerHTML with either
+ * function's output (see renderOverview below and adminApplications.ts's
+ * loadApplicationAnalytics). Re-clamps defensively even though
+ * percentBarWidth already clamped the value that was written into the
+ * attribute - this reads it back out of the DOM, not the original number.
+ */
+export function applyBarWidths(container: HTMLElement): void {
+  container.querySelectorAll<HTMLElement>('.analytics-bar-fill[data-bar-width]').forEach((el) => {
+    // el.dataset.barWidth is always a string (HTML attributes have no
+    // number type) - percentBarWidth requires an actual `number` to accept
+    // anything (see normalizePercent), so an unconverted string would
+    // always fail its typeof check and silently collapse every bar to 0%.
+    el.style.width = `${percentBarWidth(Number(el.dataset.barWidth))}%`;
+  });
 }
 
 /** Exported for reuse by adminApplications.ts's application detail modal.
@@ -331,7 +355,7 @@ export function sectionAnalyticsListHtml(items: SectionAnalyticsItem[], emptyMes
             <div><dt>Наведений</dt><dd>${escapeHtml(interactions)}</dd></div>
           </dl>
           <div class="analytics-bar-track" role="img" aria-label="${escapeHtml(barLabel)}">
-            <div class="analytics-bar-fill" style="width: ${barWidth}%"></div>
+            <div class="analytics-bar-fill" data-bar-width="${barWidth}"></div>
           </div>
         </li>
       `;
@@ -379,9 +403,22 @@ function kpiGroupsHtml(overview: AnalyticsOverview): string {
       { label: 'Среднее время на странице', value: formatSeconds(overview.average_time_on_page_seconds) },
       { label: 'Медианное время на странице', value: formatSeconds(overview.median_time_on_page_seconds) },
     ]),
-    kpiGroupHtml('Возвраты', [
-      { label: 'Среднее число возвратов', value: formatAverageReturns(overview.average_return_count) },
-      { label: 'Всего возвратов', value: formatCount(overview.total_return_count) },
+    // Stage 4 correction: this used to be labeled "Возвраты" ("Returns") -
+    // wording that implied a count of how many times someone came back to
+    // the application form. What return_count actually is (see
+    // frontend/src/metrics/behaviorMetrics.ts::readAndIncrementReturnCount,
+    // and app/services/behavior_analytics.py's module docstring) is the
+    // value of a long-lived localStorage counter on the visitor's browser,
+    // read at the moment each application was submitted - visit #1 means no
+    // prior visit was ever recorded on that browser, not "zero returns to
+    // this form". Summed/averaged across applications from possibly
+    // different browsers, that is a sum/average of those per-device
+    // snapshot values, not a count of distinct return visits in the period
+    // - so the labels below describe the counter, not a "returns" claim the
+    // data can't support (see the caption below the KPI groups too).
+    kpiGroupHtml('Визиты с устройства', [
+      { label: 'Средний счётчик визитов', value: formatAverageReturns(overview.average_return_count) },
+      { label: 'Сумма счётчика визитов', value: formatCount(overview.total_return_count) },
     ]),
     kpiGroupHtml('Клики', [
       { label: 'Кликов по кнопкам', value: formatCount(overview.total_button_clicks) },
@@ -418,6 +455,11 @@ function shellTemplate(): string {
 
       <p class="analytics-caption">
         Статистика рассчитана по отправленным заявкам и связанным с ними поведенческим метрикам.
+      </p>
+      <p class="analytics-caption">
+        «Визиты с устройства» — это счётчик посещений сайта, который хранится в localStorage
+        браузера посетителя и не идентифицирует конкретного человека: значение сбрасывается при
+        очистке данных браузера и отдельно ведётся на каждом устройстве.
       </p>
 
       <p class="admin-empty" id="analytics-empty-note" hidden>За выбранный период данных пока нет.</p>
@@ -492,10 +534,12 @@ function renderOverview(container: HTMLElement, state: AnalyticsState): void {
     overview.popular_buttons,
     'За выбранный период кликов по кнопкам не зафиксировано.',
   );
+  applyBarWidths(buttonsEl);
   sectionsEl.innerHTML = sectionAnalyticsListHtml(
     overview.section_activity,
     'За выбранный период активность по секциям не зафиксирована.',
   );
+  applyBarWidths(sectionsEl);
 }
 
 async function loadOverview(

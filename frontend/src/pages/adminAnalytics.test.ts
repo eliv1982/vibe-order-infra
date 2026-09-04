@@ -4,6 +4,8 @@ import { ApiError } from '../api/client';
 import type { AnalyticsOverview } from '../api/types';
 import {
   analyticsPeriodLabel,
+  applyBarWidths,
+  buttonAnalyticsListHtml,
   formatAnalyticsDate,
   formatAnalyticsDateTime,
   formatAnalyticsName,
@@ -19,6 +21,7 @@ import {
   normalizeCount,
   normalizePercent,
   percentBarWidth,
+  sectionAnalyticsListHtml,
   type AnalyticsSectionController,
   type AnalyticsSectionHost,
 } from './adminAnalytics';
@@ -235,6 +238,19 @@ describe('rendering', () => {
     expect(container.textContent).toContain(
       'Статистика рассчитана по отправленным заявкам и связанным с ними поведенческим метрикам.',
     );
+  });
+
+  it('Stage 4: labels return_count as a device visit counter, never as "Возвраты"/returns', async () => {
+    // return_count is a per-device localStorage visit-counter snapshot at
+    // submission time (see app/services/behavior_analytics.py's module
+    // docstring for the full traced explanation) - not a count of how many
+    // times someone returned to the form. The KPI group/labels must match
+    // that, and must never regress back to implying a stronger claim.
+    const container = await renderWithOverview(makeOverview());
+    expect(container.textContent).toContain('Визиты с устройства');
+    expect(container.textContent).not.toContain('Возвраты');
+    expect(container.textContent).not.toContain('Среднее число возвратов');
+    expect(container.textContent).not.toContain('Всего возвратов');
   });
 
   it('shows an empty-overview note plus per-section empty states when every count is zero', async () => {
@@ -853,6 +869,44 @@ describe('normalizePercent / percentBarWidth / formatPercent', () => {
     expect(percentBarWidth(input)).toBe(0);
     expect(formatPercent(input)).toBe('—');
     expect(normalizePercent(input)).toBeNull();
+  });
+});
+
+describe('CSP compliance: bar width is never an inline style="" attribute', () => {
+  // Stage 4: nginx/conf.d/vibe.elivcloud.org.conf's Content-Security-Policy
+  // has no 'unsafe-inline' in style-src. The rendered markup must never
+  // contain a literal style="..." attribute (blocked by that policy) - the
+  // width is instead applied afterward via the CSSOM (.style.width, which
+  // style-src does not restrict - see MDN's style-src docs, "violation
+  // cases": properties set directly via element.style are not blocked).
+  const items = [{ name: 'X', count: 1, share_percent: 40 }];
+
+  it('buttonAnalyticsListHtml never emits a style attribute', () => {
+    expect(buttonAnalyticsListHtml(items, 'empty')).not.toContain('style=');
+  });
+
+  it('sectionAnalyticsListHtml never emits a style attribute', () => {
+    const sections = [
+      { section: 'X', total_duration_seconds: 1, average_duration_seconds: 1, interactions_count: 1, share_percent: 40 },
+    ];
+    expect(sectionAnalyticsListHtml(sections, 'empty')).not.toContain('style=');
+  });
+
+  it('applyBarWidths sets the CSSOM width from data-bar-width after the markup is inserted', () => {
+    const container = document.createElement('div');
+    container.innerHTML = buttonAnalyticsListHtml(items, 'empty');
+    applyBarWidths(container);
+
+    const fill = container.querySelector<HTMLElement>('.analytics-bar-fill')!;
+    expect(fill.style.width).toBe('40%');
+  });
+
+  it('applyBarWidths clamps and degrades a malformed/missing data-bar-width to 0%', () => {
+    const container = document.createElement('div');
+    container.innerHTML = '<div class="analytics-bar-fill" data-bar-width="not-a-number"></div>';
+    applyBarWidths(container);
+
+    expect(container.querySelector<HTMLElement>('.analytics-bar-fill')!.style.width).toBe('0%');
   });
 });
 

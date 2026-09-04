@@ -188,7 +188,7 @@ def test_legacy_database_adoption_and_upgrade_end_to_end(legacy_stage2_database)
         with migration_engine.connect() as conn:
             head_version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
         # 16. Database reaches Alembic head.
-        assert head_version == "0003_stage1b_service_idemp"
+        assert head_version == "0004_stage4_priority_score"
 
         inspector = inspect(migration_engine)
         # 4. Stage 1A capability table exists.
@@ -252,7 +252,7 @@ def test_legacy_database_adoption_and_upgrade_end_to_end(legacy_stage2_database)
         with migration_engine.connect() as conn:
             assert (
                 conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "0003_stage1b_service_idemp"
+                == "0004_stage4_priority_score"
             )
     finally:
         migration_engine.dispose()

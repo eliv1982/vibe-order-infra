@@ -58,8 +58,9 @@ host (backend, PostgreSQL, Registry сегодня так и сделаны, с�
   через SSH-туннель и остановлен после проверки.
 - **Backend + frontend, включая административную панель, JWT-аутентификацию,
   приоритизацию заявок и поведенческую аналитику**: реализованы, покрыты
-  тестами локально (backend suite на реальной PostgreSQL: **355 passed**,
-  frontend suite: **447 passed**) и **задеплоены на production VPS**.
+  тестами локально (backend suite на реальной PostgreSQL: **638 passed, 1
+  skipped**, frontend suite: **469 passed**) и **задеплоены на production
+  VPS**.
   Полная ручная production-приемка пройдена (см. "Ручная end-to-end
   приемка" ниже): регистрация первого администратора, повторные
   login/logout, CRUD услуг, публичная форма заявки, behavior metrics,
@@ -580,7 +581,8 @@ pytest
 (Реальные учетные данные здесь не публикуются — подставляются локально.)
 
 Итог прогона против отдельной реальной PostgreSQL test-базы (включая auth,
-admin CRUD, приоритизацию заявок и analytics): **355 passed**.
+admin CRUD, приоритизацию заявок с поиском/фильтром по приоритету, и
+analytics): **638 passed, 1 skipped**.
 
 ### Frontend
 
@@ -592,7 +594,7 @@ npm run build
 npm audit
 ```
 
-Итог: **447 tests passed**, `npm run build` — успешно, `npm audit` — **0
+Итог: **469 tests passed**, `npm run build` — успешно, `npm audit` — **0
 vulnerabilities**. Покрытие тестами (coverage) не измерялось — количество
 тестов не эквивалентно проценту покрытия кода.
 
@@ -1250,13 +1252,58 @@ json-file` с `max-size: "10m"`, `max-file: "3"` — до ~30MB логов на
   данных").
 - Behavior-аналитика — первого рода (без сторонних сервисов), локальна и
   агрегирована; точные координаты курсора и содержимое полей формы не
-  собираются.
+  собираются. Пользователю показывается краткое уведомление о сборе данных
+  прямо над формой заявки (см. `frontend/src/pages/home.ts`,
+  `privacyNoticeTemplate`).
+- Хранение данных заявок (Stage 4): автоматического срока хранения,
+  запланированной очистки или воркера-по-расписанию нет. Заявки и связанные
+  с ними поведенческие метрики хранятся до явного удаления администратором
+  через аутентифицированный `DELETE /api/applications/{id}` — удаление
+  каскадно удаляет и связанную запись `behavior_metrics` (FK
+  `ON DELETE CASCADE`, см. `app/models/behavior_metric.py`). Эндпоинт уже
+  существует и требует admin-токен, но в самой админ-панели (раздел
+  "Заявки") пока нет кнопки/действия для удаления — на практике удаление
+  сейчас делается прямым авторизованным запросом к API (curl/Postman и
+  т.п.), не через UI. Это осознанно задокументированное текущее поведение,
+  а не пробел: заводить Celery/cron/воркер под автоматическую ретенцию для
+  этого учебного этапа избыточно (см. также "Дальше по плану").
 - Секреты (`.env`, `registry/auth/htpasswd`, TLS-ключи, `JWT_SECRET_KEY`) не
   хранятся в git — создаются/монтируются на VPS отдельно, `.env` — с правами
   `600`.
-- HSTS не включен, автопродление сертификата Let's Encrypt не
-  автоматизировано. Watchtower удален из инфраструктуры (Stage 3, см.
-  "Почему так") — обновления образов только явные, ручные.
+- HSTS включён (Stage 4) на HTTPS-ответах основного сайта
+  (`nginx/conf.d/vibe.elivcloud.org.conf`, 443 `server{}`), `max-age=180`
+  дней, без `includeSubDomains`/`preload` (см. комментарий в этом файле
+  рядом с заголовком) — никогда на порту 80 (HTTP), только после успешного
+  редиректа на HTTPS. Content-Security-Policy добавлен там же, выведен из
+  реально собранного frontend (`'self'`-only: свой JS/CSS/шрифты, без
+  `unsafe-inline`/`unsafe-eval`) — см. комментарий там же. Автопродление
+  сертификата Let's Encrypt не автоматизировано. Watchtower удален из
+  инфраструктуры (Stage 3, см. "Почему так") — обновления образов только
+  явные, ручные.
+- Container hardening (Stage 4), проверено живым disposable Compose-стеком:
+  `no-new-privileges` на postgres, backend, registry, nginx и всех трёх
+  one-shot DB-lifecycle сервисах; `cap_drop: ALL` + `read_only: true`
+  (+ tmpfs `/tmp`) на backend и всех трёх one-shot DB-lifecycle сервисах
+  (чистый Python-процесс без записи в собственную ФС); `cap_drop: ALL` +
+  точечный `cap_add` (`NET_BIND_SERVICE`, `SETUID`, `SETGID`, `CHOWN`) +
+  `read_only: true` + tmpfs (`/var/cache/nginx`, `/var/run`, `/tmp`) на
+  Nginx. PostgreSQL/Registry получили только `no-new-privileges` — их
+  entrypoint'ы делают root-level инициализацию (chown тома, init-скрипты)
+  перед сбросом привилегий, поэтому более глубокий hardening для них не
+  применялся без отдельного точечного доказательства совместимости (см.
+  `docker-compose.yml`, комментарии у каждого сервиса). pgAdmin намеренно
+  НЕ получил даже `no-new-privileges`: живая проверка (`docker compose
+  --profile admin up`) показала, что под ним pgAdmin детектирует
+  "restricted security context" и молча переключает внутренний порт
+  прослушивания с 80 на 8080, из-за чего фиксированный проброс порта
+  `127.0.0.1:5050:80` (и задокументированный SSH-туннель к нему, см. раздел
+  "pgAdmin" выше) перестаёт работать. Ровно тот случай "ломает нормальную
+  работу", когда Stage 4 требует откатить hardening, а не обходить его —
+  см. комментарий у сервиса `pgadmin` в `docker-compose.yml`.
+  Заодно исправлено: three one-shot DB-lifecycle сервиса (db-roles-bootstrap/
+  db-migrate/db-roles-finalize) больше не наследуют HTTP-based HEALTHCHECK
+  backend-образа — раньше Docker после их успешного exit 0 всё равно помечал
+  их "unhealthy" (`healthcheck: disable: true`).
 
 Проект в целом — учебный: инфраструктура и подход к security сделаны
 production-like, но проект не претендует на полную production-readiness (нет
@@ -1296,8 +1343,9 @@ production-like, но проект не претендует на полную p
 Bootstrap, HTTPS, Registry-smoke-test, backend/frontend (публичная форма,
 behavior metrics), административная панель, JWT-auth, приоритизация заявок
 и поведенческая аналитика — реализованы, покрыты тестами локально
-(backend: 355 passed, frontend: 447 passed) и **задеплоены на production
-VPS**; полная ручная приемка пройдена (см. "Ручная end-to-end приемка").
+(backend: 638 passed, 1 skipped; frontend: 469 passed) и **задеплоены на
+production VPS**; полная ручная приемка пройдена (см. "Ручная end-to-end
+приемка").
 Из содержательного остается:
 
 1. Внедрить Alembic-миграции вместо `Base.metadata.create_all()` — нужно

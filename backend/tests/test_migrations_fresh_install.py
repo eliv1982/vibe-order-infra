@@ -99,7 +99,7 @@ def test_fresh_install_reaches_head_with_full_schema(fresh_stage2_database):
         # 4. Alembic version is at head.
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == "0003_stage1b_service_idemp"
+        assert version == "0004_stage4_priority_score"
 
         # 5. Expected tables exist.
         inspector = inspect(engine)
@@ -131,7 +131,7 @@ def test_fresh_install_reaches_head_with_full_schema(fresh_stage2_database):
     try:
         with engine.connect() as conn:
             version_again = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version_again == "0003_stage1b_service_idemp"
+        assert version_again == "0004_stage4_priority_score"
     finally:
         engine.dispose()
 

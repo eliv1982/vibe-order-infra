@@ -99,6 +99,10 @@ _CURRENT_TABLES: tuple[TableSpec, ...] = (
             ColumnSpec("comment", "TEXT", nullable=True),
             ColumnSpec("created_at", "TIMESTAMPTZ", nullable=False, server_default=True),
             ColumnSpec("updated_at", "TIMESTAMPTZ", nullable=False, server_default=True),
+            # Stage 4: materialized copy of score_application(...).score,
+            # maintained client-side (SQLAlchemy mapper event, never a
+            # PostgreSQL server-side default) - see app/models/application.py.
+            ColumnSpec("priority_score", "INTEGER", nullable=False, server_default=True),
         ),
         primary_key=("id",),
         foreign_keys=(

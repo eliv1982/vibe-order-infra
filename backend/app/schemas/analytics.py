@@ -47,8 +47,31 @@ class AnalyticsOverview(BaseModel):
     applications_without_metrics: int = Field(..., ge=0)
     average_time_on_page_seconds: float | None = Field(None, ge=0)
     median_time_on_page_seconds: float | None = Field(None, ge=0)
-    average_return_count: float | None = Field(None, ge=0)
-    total_return_count: int = Field(..., ge=0)
+    # See app.services.behavior_analytics's module docstring for the full,
+    # traced explanation of what return_count actually measures (a per-
+    # device localStorage visit counter snapshot, not a count of distinct
+    # return visits) - these two fields are the mean/sum of that value
+    # across every metric in the period, not "average/total number of
+    # people who came back".
+    average_return_count: float | None = Field(
+        None,
+        ge=0,
+        description=(
+            "Mean of return_count (a per-device localStorage visit-counter "
+            "snapshot, not a return-visit count - see app.services."
+            "behavior_analytics's module docstring) across every metric in "
+            "this period."
+        ),
+    )
+    total_return_count: int = Field(
+        ...,
+        ge=0,
+        description=(
+            "Sum of return_count across every metric in this period - see "
+            "average_return_count's description above for what that value "
+            "actually represents."
+        ),
+    )
     total_button_clicks: int = Field(..., ge=0)
     unique_clicked_buttons: int = Field(..., ge=0)
     popular_buttons: list[ButtonAnalyticsItem] = Field(default_factory=list)
@@ -62,7 +85,16 @@ class ApplicationBehaviorAnalyticsRead(BaseModel):
     application_id: int = Field(..., gt=0)
     has_metrics: bool
     time_on_page_seconds: float | None = Field(None, ge=0)
-    return_count: int | None = Field(None, ge=0)
+    return_count: int | None = Field(
+        None,
+        ge=0,
+        description=(
+            "return_count from this application's BehaviorMetric row - a "
+            "per-device localStorage visit-counter snapshot at submission "
+            "time, not a count of returns to this form. See app.services."
+            "behavior_analytics's module docstring."
+        ),
+    )
     clicked_buttons: list[ButtonAnalyticsItem] = Field(default_factory=list)
     section_activity: list[SectionAnalyticsItem] = Field(default_factory=list)
     total_button_clicks: int = Field(..., ge=0)

@@ -24,6 +24,7 @@ import type {
   BehaviorMetricCreatePayload,
   BehaviorMetricRead,
   PrioritizedApplicationList,
+  PriorityLevel,
   TokenResponse,
 } from './types';
 import { clearToken, getToken } from './tokenStorage';
@@ -72,6 +73,13 @@ export function extractErrorDetail(body: unknown, fallback: string): string {
   }
 
   return fallback;
+}
+
+/** Optional server-side criteria for GET /applications/prioritized (Stage 4
+ * correction) - see api.getPrioritizedApplications's docstring below. */
+export interface PrioritizedApplicationsQuery {
+  search?: string;
+  priority?: PriorityLevel;
 }
 
 interface RequestOpts {
@@ -180,8 +188,22 @@ export const api = {
     post<ApplicationCreateRead>('/applications', payload, {
       headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
     }),
-  getPrioritizedApplications: (skip = 0, limit = 100) => {
+  /**
+   * `query.search`/`query.priority` (Stage 4 correction), when given, are
+   * sent as the `search`/`priority` query params to
+   * GET /applications/prioritized - the backend applies both criteria
+   * before COUNT and OFFSET/LIMIT (see app/crud/application.py::
+   * get_prioritized_applications_page), so `total` on the response already
+   * reflects the filtered corpus. Blank/whitespace-only search and the
+   * `all` priority level are represented by simply omitting the
+   * corresponding param, matching the endpoint's own "omitted = no filter"
+   * default (see pages/adminApplications.ts for where that omission
+   * decision is made).
+   */
+  getPrioritizedApplications: (skip = 0, limit = 100, query: PrioritizedApplicationsQuery = {}) => {
     const params = new URLSearchParams({ skip: String(skip), limit: String(limit) });
+    if (query.search) params.set('search', query.search);
+    if (query.priority) params.set('priority', query.priority);
     return get<PrioritizedApplicationList>(`/applications/prioritized?${params.toString()}`, {
       auth: true,
     });

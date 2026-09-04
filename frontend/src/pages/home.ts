@@ -117,6 +117,8 @@ export function homeTemplate(): string {
           <p>Расскажите немного о себе и уточните детали — мы свяжемся с вами удобным способом.</p>
         </div>
 
+        ${privacyNoticeTemplate()}
+
         <div class="card application-summary" id="application-summary" aria-live="polite"></div>
 
         <div class="card form-card" id="form-card" hidden>
@@ -140,6 +142,31 @@ export function homeTemplate(): string {
         </div>
       </footer>
     </div>
+  `;
+}
+
+/**
+ * Stage 4: plain-language disclosure of what the public application flow
+ * actually collects - placed before the form so it is read before, not
+ * after, filling anything in. Deliberately describes only what this code
+ * genuinely does (see wireHoverTracking/sendBehaviorMetrics below and
+ * frontend/src/metrics/behaviorMetrics.ts) rather than a generic/inflated
+ * privacy policy: contact/application fields the applicant types in, plus
+ * the same coarse, first-party behavior counters the "Статистика" admin
+ * tab already surfaces (see adminAnalytics.ts) - no third-party analytics,
+ * no cursor coordinates, no form-field contents beyond the application
+ * itself. Exported for testing (see pages/render.test.ts).
+ */
+export function privacyNoticeTemplate(): string {
+  return `
+    <p class="form-privacy-note">
+      Что вы отправляете нам: контактные данные и сведения из формы заявки, а также несколько
+      технических показателей поведения на странице — клики по ключевым кнопкам, время на странице,
+      наведение курсора на разделы формы и счётчик визитов вашего браузера. Мы не записываем
+      координаты курсора и содержимое текстовых полей помимо самой заявки. Эти данные используются
+      для приоритизации заявок и статистики использования сайта в рамках этого демонстрационного
+      проекта. Отправляя заявку, вы подтверждаете согласие на передачу перечисленных данных.
+    </p>
   `;
 }
 
