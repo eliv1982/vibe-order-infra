@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.database import Base
+from app.core.db_base import Base
 
 if TYPE_CHECKING:
     from app.models.behavior_metric import BehaviorMetric
@@ -56,9 +56,11 @@ class Application(Base):
     service_id is nullable at the DB/model level - not because a new
     submission is ever allowed to omit it (ApplicationCreate.service_id is
     required, see app/schemas/application.py), but because a database
-    upgraded from the accepted Stage 1A baseline (see
-    app/core/schema_compat.py) has historical rows with no service to point
-    at and no deterministic way to infer one from their free-text
+    upgraded from the legacy/Stage-1A baseline (see backend/alembic/versions/
+    0003_stage1b_service_idemp.py, which ADD COLUMNs it as nullable, and
+    app/db_admin/adopt_legacy.py for how a real legacy production database
+    reaches that same migration) has historical rows with no service to
+    point at and no deterministic way to infer one from their free-text
     interested_product alone. ApplicationRead.service_id is therefore also
     Optional, so those historical rows keep reading back correctly.
     """

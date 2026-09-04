@@ -25,8 +25,18 @@ class Settings(BaseSettings):
 
     api_prefix: str = "/api"
 
-    postgres_user: str
-    postgres_password: str
+    # Runtime application DB credential ONLY (Stage 2: database lifecycle /
+    # least-privileged runtime). This is deliberately NOT the migration/owner
+    # credential (see backend/alembic/env.py, which reads MIGRATION_DB_USER/
+    # MIGRATION_DB_PASSWORD directly from the environment, never through this
+    # Settings class) and NOT the Postgres cluster bootstrap/superuser
+    # credential (POSTGRES_USER/POSTGRES_PASSWORD on the `postgres` container
+    # itself - see docker-compose.yml and app/db_admin/). The backend process
+    # must be able to run its normal CRUD operations with this credential
+    # alone and nothing more - it has no DDL rights (see
+    # app/db_admin/bootstrap_roles.py for the exact grants).
+    app_db_user: str
+    app_db_password: str
     postgres_db: str
     postgres_host: str = "postgres"
     postgres_port: int = 5432
@@ -57,11 +67,14 @@ class Settings(BaseSettings):
     def database_url(self) -> URL:
         # Built via URL.create() rather than an f-string so a password
         # containing reserved URL characters (@, :, /, %) is escaped
-        # correctly instead of breaking the connection string.
+        # correctly instead of breaking the connection string. Always the
+        # least-privileged runtime credential - see app_db_user/app_db_password
+        # above. Alembic migrations use a completely separate URL (see
+        # backend/alembic/env.py) and never this one.
         return URL.create(
             drivername="postgresql+psycopg",
-            username=self.postgres_user,
-            password=self.postgres_password,
+            username=self.app_db_user,
+            password=self.app_db_password,
             host=self.postgres_host,
             port=self.postgres_port,
             database=self.postgres_db,

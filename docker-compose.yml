@@ -277,18 +277,114 @@ services:
     # версия обновляется вручную.
 
   # ------------------------------------------------------------------
+  # Stage 2 (database lifecycle): три one-shot сервиса устанавливают роли и
+  # применяют Alembic-миграции ДО запуска backend. Все три используют один и
+  # тот же образ backend (см. backend/Dockerfile, секция про four launches
+  # этого образа) — отличаются только "command:" и тем, какой креденшл им
+  # передан через "environment:". Ни один не публикует портов, ни один не
+  # перезапускается ("restart" не задан = "no", запустился/отработал/вышел).
+  #
+  # Цепочка: postgres (healthy) -> db-roles-bootstrap (создаёт роли,
+  # выставляет ALTER DEFAULT PRIVILEGES) -> db-migrate (alembic upgrade head
+  # от имени migration-роли) -> db-roles-finalize (тот же идемпотентный
+  # bootstrap-скрипт повторно — подхватывает только что созданные Alembic'ом
+  # таблицы/sequences и явно REVOKE на alembic_version) -> backend (только
+  # APP_DB_USER/APP_DB_PASSWORD, без прав DDL). depends_on с
+  # condition: service_completed_successfully делает эту цепочку
+  # детерминированной: следующий шаг не стартует, пока предыдущий не вышел с
+  # кодом 0.
+  # ------------------------------------------------------------------
+  db-roles-bootstrap:
+    build: ./backend
+    command: ["python", "-m", "app.db_admin.bootstrap_roles"]
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:?POSTGRES_USER must be set}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
+      POSTGRES_DB: "${POSTGRES_DB:?POSTGRES_DB must be set}"
+      POSTGRES_HOST: postgres
+      MIGRATION_DB_USER: "${MIGRATION_DB_USER:?MIGRATION_DB_USER must be set}"
+      MIGRATION_DB_PASSWORD: "${MIGRATION_DB_PASSWORD:?MIGRATION_DB_PASSWORD must be set}"
+      APP_DB_USER: "${APP_DB_USER:?APP_DB_USER must be set}"
+      APP_DB_PASSWORD: "${APP_DB_PASSWORD:?APP_DB_PASSWORD must be set}"
+    networks:
+      - app-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+
+  db-migrate:
+    build: ./backend
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:?POSTGRES_DB must be set}"
+      POSTGRES_HOST: postgres
+      MIGRATION_DB_USER: "${MIGRATION_DB_USER:?MIGRATION_DB_USER must be set}"
+      MIGRATION_DB_PASSWORD: "${MIGRATION_DB_PASSWORD:?MIGRATION_DB_PASSWORD must be set}"
+    networks:
+      - app-net
+    depends_on:
+      db-roles-bootstrap:
+        condition: service_completed_successfully
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+
+  db-roles-finalize:
+    build: ./backend
+    command: ["python", "-m", "app.db_admin.bootstrap_roles"]
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:?POSTGRES_USER must be set}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
+      POSTGRES_DB: "${POSTGRES_DB:?POSTGRES_DB must be set}"
+      POSTGRES_HOST: postgres
+      MIGRATION_DB_USER: "${MIGRATION_DB_USER:?MIGRATION_DB_USER must be set}"
+      MIGRATION_DB_PASSWORD: "${MIGRATION_DB_PASSWORD:?MIGRATION_DB_PASSWORD must be set}"
+      APP_DB_USER: "${APP_DB_USER:?APP_DB_USER must be set}"
+      APP_DB_PASSWORD: "${APP_DB_PASSWORD:?APP_DB_PASSWORD must be set}"
+    networks:
+      - app-net
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+
+  # ------------------------------------------------------------------
   # Backend — FastAPI-приложение приёма заявок (см. backend/).
   # Порт 8000 НЕ публикуется на host (нет "ports:") — доступен только
   # другим контейнерам по внутреннему DNS-имени "backend" через
   # app-net (доступ к postgres по hostname "postgres") и proxy-net
   # (будущий proxy_pass из Nginx, пока не подключён).
+  #
+  # Stage 2: подключается ИСКЛЮЧИТЕЛЬНО как runtime-роль (APP_DB_USER/
+  # APP_DB_PASSWORD, без прав DDL — см. app/db_admin/bootstrap_roles.py).
+  # Миграционный/владеющий креденшл (MIGRATION_DB_USER) backend никогда не
+  # видит. Схему больше не создаёт и не мутирует сам (см. app/main.py
+  # lifespan / app/core/schema_check.py) — ждёт, пока db-roles-finalize
+  # (а значит и db-migrate до него) успешно завершится.
   # ------------------------------------------------------------------
   backend:
     build: ./backend
     restart: unless-stopped
     environment:
-      POSTGRES_USER: "${POSTGRES_USER:?POSTGRES_USER must be set}"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
+      APP_DB_USER: "${APP_DB_USER:?APP_DB_USER must be set}"
+      APP_DB_PASSWORD: "${APP_DB_PASSWORD:?APP_DB_PASSWORD must be set}"
       POSTGRES_DB: "${POSTGRES_DB:?POSTGRES_DB must be set}"
       POSTGRES_HOST: postgres
       # No fallback for the secret itself - an absent JWT_SECRET_KEY must
@@ -304,8 +400,8 @@ services:
       - app-net
       - proxy-net
     depends_on:
-      postgres:
-        condition: service_healthy
+      db-roles-finalize:
+        condition: service_completed_successfully
     deploy:
       resources:
         limits:

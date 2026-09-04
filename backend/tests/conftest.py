@@ -12,13 +12,14 @@ database name is validated by assert_safe_test_database_url() (see
 db_safety_guard.py) so a misconfigured TEST_DATABASE_URL can never point at
 a production-looking database.
 
-POSTGRES_USER/PASSWORD/DB placeholders below only satisfy Settings()
-validation at import time (app.core.database builds a lazy SQLAlchemy
-engine from them at module load — no connection is opened until something
-queries it). Tests never query that engine: the `client` fixture overrides
-the get_db dependency to use a session bound to TEST_DATABASE_URL instead,
-and TestClient is used without a `with` block so the app's lifespan (which
-would call Base.metadata.create_all on the production engine) never runs.
+APP_DB_USER/APP_DB_PASSWORD/POSTGRES_DB placeholders below only satisfy
+Settings() validation at import time (app.core.database builds a lazy
+SQLAlchemy engine from them at module load — no connection is opened until
+something queries it). Tests never query that engine: the `client` fixture
+overrides the get_db dependency to use a session bound to TEST_DATABASE_URL
+instead, and TestClient is used without a `with` block so the app's lifespan
+(which would run app.core.schema_check against the production engine) never
+runs.
 """
 
 import os
@@ -28,8 +29,16 @@ import os
 # set in the environment the tests run in.
 _PRODUCTION_POSTGRES_DB = os.environ.get("POSTGRES_DB")
 
-os.environ.setdefault("POSTGRES_USER", "unused_placeholder_user")
-os.environ.setdefault("POSTGRES_PASSWORD", "unused_placeholder_password")
+# Stage 2: Settings (app/core/config.py) only ever builds the *runtime*
+# database URL from APP_DB_USER/APP_DB_PASSWORD - never POSTGRES_USER/
+# POSTGRES_PASSWORD (the cluster bootstrap/admin credential) or
+# MIGRATION_DB_USER/MIGRATION_DB_PASSWORD (Alembic's credential, read
+# directly from the environment by backend/alembic/env.py, never through
+# Settings). These placeholders only satisfy Settings() validation at import
+# time - see the module docstring above; no test ever queries the engine
+# built from them.
+os.environ.setdefault("APP_DB_USER", "unused_placeholder_user")
+os.environ.setdefault("APP_DB_PASSWORD", "unused_placeholder_password")
 os.environ.setdefault("POSTGRES_DB", "unused_placeholder_db")
 # Fixed test-only secret - long enough to pass Settings' min_length=32 and
 # distinct from the .env.example placeholder, so it isn't rejected as an

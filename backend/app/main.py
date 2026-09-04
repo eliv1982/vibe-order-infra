@@ -1,4 +1,4 @@
-"""FastAPI application entrypoint: startup table creation and the top-level /api router."""
+"""FastAPI application entrypoint: startup schema guard and the top-level /api router."""
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -7,24 +7,20 @@ from fastapi import APIRouter, FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import DataError
 
-from app import models  # noqa: F401 - registers models on Base.metadata before create_all()
-from app.core.database import Base, engine
-from app.core.schema_compat import upgrade_applications_service_id
+from app import models  # noqa: F401 - registers every mapped class before first use
+from app.core.database import engine
+from app.core.schema_check import ensure_database_ready
 from app.routes import admin_settings, analytics, applications, auth, behavior_metrics
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    # Учебный этап: таблицы создаются напрямую через metadata.create_all(),
-    # без Alembic-миграций. upgrade_applications_service_id() is a narrow,
-    # idempotent exception to that: it ALTERs an *existing* Stage 1A
-    # `applications` table to add `service_id` (create_all() only CREATEs
-    # missing tables, it never ALTERs one that's already there) - see
-    # app/core/schema_compat.py. Must run before create_all() so a brand-new
-    # database still gets the column via the normal model-driven CREATE
-    # TABLE, with nothing left for this step to do.
-    upgrade_applications_service_id(engine)
-    Base.metadata.create_all(bind=engine)
+    # Stage 2: Alembic migrations (see backend/alembic/) are the only schema
+    # evolution mechanism. Startup never creates or alters anything - it only
+    # verifies the database already has the schema this app version expects
+    # and fails clearly (not silently) if it doesn't. See
+    # app/core/schema_check.py.
+    ensure_database_ready(engine)
     yield
 
 

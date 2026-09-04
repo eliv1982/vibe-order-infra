@@ -1,4 +1,12 @@
-"""Import all models here so Base.metadata sees them before create_all() runs."""
+"""Import all models here so Base.metadata sees every mapped class.
+
+Stage 2: the only real schema-evolution mechanism is Alembic (see
+backend/alembic/, whose env.py imports this package for exactly this
+reason, before autogenerate/`alembic check` compares Base.metadata against
+the live database). Base.metadata.create_all()/drop_all() are still used,
+but only by the test suite against a disposable TEST_DATABASE_URL (see
+tests/conftest.py) - never against a real/production database at runtime.
+"""
 
 from app.models.admin import Admin
 from app.models.admin_setting import AdminSetting
