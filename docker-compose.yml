@@ -306,7 +306,14 @@ services:
   # кодом 0.
   # ------------------------------------------------------------------
   db-roles-bootstrap:
-    build: ./backend
+    # Stage 5 correction: no own "build:" here on purpose - this service
+    # must consume the exact same release image as "backend" (see that
+    # service's comment below and README, "Docker Compose"), not a
+    # separately-built image that merely happens to share a Dockerfile.
+    # "docker compose build backend" (or a plain "up -d", which builds any
+    # service still missing its image before starting anything) produces
+    # this tag once; every other service below only ever references it.
+    image: vibe-order-infra-backend:latest
     command: ["python", "-m", "app.db_admin.bootstrap_roles"]
     # Stage 4 correction: this one-shot service inherits the backend image's
     # HEALTHCHECK (backend/Dockerfile - CMD ["python", "healthcheck.py"],
@@ -359,7 +366,8 @@ services:
         max-file: "3"
 
   db-migrate:
-    build: ./backend
+    # Stage 5: same shared-image rationale as db-roles-bootstrap above.
+    image: vibe-order-infra-backend:latest
     command: ["alembic", "upgrade", "head"]
     # See db-roles-bootstrap's healthcheck/hardening comments above - same
     # image, same fix, same reasoning.
@@ -389,7 +397,8 @@ services:
         max-file: "3"
 
   db-roles-finalize:
-    build: ./backend
+    # Stage 5: same shared-image rationale as db-roles-bootstrap above.
+    image: vibe-order-infra-backend:latest
     command: ["python", "-m", "app.db_admin.bootstrap_roles"]
     # See db-roles-bootstrap's healthcheck/hardening comments above - same
     # image, same fix, same reasoning.
@@ -441,9 +450,23 @@ services:
   # schema-check, что и app/core/schema_check.py::ensure_database_ready.
   # Backend становится "healthy" для Compose/Nginx только когда реально
   # готов обслуживать трафик, а не просто когда стартовал процесс Uvicorn.
+  #
+  # Stage 5 correction: an explicit "image:" pins the name/tag that ALL
+  # FOUR backend/database-lifecycle services below share (this one,
+  # db-roles-bootstrap, db-migrate, db-roles-finalize) - before this they
+  # each had their own bare "build: ./backend" with no "image:", so Compose
+  # generated four distinct default image names (one per service) despite
+  # docs describing "one release image". This is now the single service
+  # that ever builds it; the other three only reference the same tag (see
+  # their own comments above) - Compose builds it once, during "up"'s
+  # build phase, before any container in the dependency chain starts, so
+  # db-roles-bootstrap running first is never a race. Production delivery
+  # still retags a pulled release image onto this same local tag rather
+  # than building on the VPS - see README, "Порядок деплоя".
   # ------------------------------------------------------------------
   backend:
     build: ./backend
+    image: vibe-order-infra-backend:latest
     restart: unless-stopped
     # Stage 4: see db-roles-bootstrap's matching comment above - same image,
     # same unprivileged/no-local-writes reasoning, proven live serving real

@@ -46,8 +46,8 @@ pytestmark = [
         reason="TEST_DATABASE_URL is not set - skipping PostgreSQL integration tests",
     ),
     pytest.mark.skipif(
-        shutil.which("pg_dump") is None or shutil.which("pg_restore") is None,
-        reason="pg_dump/pg_restore not on PATH - skipping real dump/restore round trip "
+        shutil.which("pg_dump") is None or shutil.which("pg_restore") is None or shutil.which("psql") is None,
+        reason="pg_dump/pg_restore/psql not on PATH - skipping real dump/restore round trip "
         "(see test_migrations_legacy_upgrade.py for the unconditional data-preservation proof)",
     ),
 ]
@@ -94,7 +94,7 @@ def test_pg_dump_restore_round_trip_then_adopt_and_migrate(source_legacy_databas
                 "pg_dump",
                 "--format=custom",
                 f"--file={dump_path}",
-                source_url.render_as_string(hide_password=False),
+                h.libpq_url(source_url),
             ]
         )
         assert dump_path.exists() and dump_path.stat().st_size > 0
@@ -105,7 +105,7 @@ def test_pg_dump_restore_round_trip_then_adopt_and_migrate(source_legacy_databas
         _run(
             [
                 "pg_restore",
-                f"--dbname={target_url.render_as_string(hide_password=False)}",
+                f"--dbname={h.libpq_url(target_url)}",
                 "--no-owner",
                 "--no-privileges",
                 str(dump_path),
@@ -221,5 +221,77 @@ def test_pg_dump_restore_round_trip_then_adopt_and_migrate(source_legacy_databas
                 conn.rollback()
         finally:
             app_engine.dispose()
+    finally:
+        h.drop_disposable_database(target_name)
+
+
+def test_clean_if_exists_restore_does_not_remove_target_only_drift(source_legacy_database, tmp_path):
+    """Stage 5 correction: empirical proof for the assumption
+    docs/RUNBOOK.md's "Restore PostgreSQL" section now relies on.
+
+    Uses the exact commands the runbook documents for backup/restore -
+    plain-format `pg_dump --clean --if-exists` piped to `psql` - not
+    `--format=custom`/`pg_restore` (see the custom-format round trip above,
+    which is a different, also-valid pairing for a different purpose).
+
+    A restore is applied to a target that already has an object the source
+    never had (simulating drift: a manually added table, a leftover from a
+    previous incident, anything the dump itself has no DROP statement for).
+    `--clean --if-exists` only emits `DROP ... IF EXISTS` for objects it
+    knows about from the source - it cannot and does not remove anything
+    else. This is why the runbook restores into a freshly dropped/recreated
+    database instead of restoring in place over a possibly-drifted one.
+    """
+    target_name = h.disposable_database_name("restore_drift")
+    h.create_disposable_database(target_name)
+    target_url = h.admin_url().set(database=target_name)
+
+    try:
+        drift_engine = create_engine(target_url)
+        try:
+            with drift_engine.begin() as conn:
+                conn.execute(text("CREATE TABLE target_only_drift (id serial primary key, note text)"))
+                conn.execute(text("INSERT INTO target_only_drift (note) VALUES ('pre-existing, not in backup')"))
+        finally:
+            drift_engine.dispose()
+
+        source_url = h.admin_url().set(database=source_legacy_database)
+        dump_path = tmp_path / "legacy.sql"
+        # Plain-format dump, exactly docs/RUNBOOK.md's "Backup PostgreSQL":
+        # `pg_dump --clean --if-exists ... > backup_file`.
+        dump_result = subprocess.run(
+            ["pg_dump", "--clean", "--if-exists", h.libpq_url(source_url)],
+            capture_output=True,
+            text=True,
+        )
+        assert dump_result.returncode == 0, f"pg_dump failed: {dump_result.stderr}"
+        dump_path.write_text(dump_result.stdout)
+        assert dump_path.stat().st_size > 0
+
+        # Exactly docs/RUNBOOK.md's restore command: `psql ... < backup_file`,
+        # applied IN PLACE over the already-populated (drifted) target -
+        # the very thing the corrected runbook no longer does directly.
+        with dump_path.open("r", encoding="utf-8") as dump_file:
+            restore_result = subprocess.run(
+                ["psql", "-v", "ON_ERROR_STOP=1", h.libpq_url(target_url)],
+                stdin=dump_file,
+                capture_output=True,
+                text=True,
+            )
+        assert restore_result.returncode == 0, f"psql restore failed: {restore_result.stderr}"
+
+        verify_engine = create_engine(target_url)
+        try:
+            with verify_engine.connect() as conn:
+                # The legacy data itself restored correctly...
+                assert conn.execute(text("SELECT count(*) FROM admins")).scalar_one() == 1
+                assert conn.execute(text("SELECT count(*) FROM applications")).scalar_one() == 2
+                # ...but the pre-existing target-only table survived
+                # untouched - proving --clean --if-exists is NOT a
+                # substitute for restoring into a verified-clean target.
+                drift_row = conn.execute(text("SELECT note FROM target_only_drift")).scalar_one()
+                assert drift_row == "pre-existing, not in backup"
+        finally:
+            verify_engine.dispose()
     finally:
         h.drop_disposable_database(target_name)

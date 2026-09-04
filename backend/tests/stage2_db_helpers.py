@@ -28,6 +28,7 @@ import os
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 from alembic.config import Config
 from sqlalchemy import create_engine, text
@@ -54,6 +55,50 @@ def admin_url():
     """The parsed TEST_DATABASE_URL itself - assumed to be a cluster
     superuser/admin connection (see module docstring)."""
     return make_url(TEST_DATABASE_URL)
+
+
+def libpq_url(url: URL) -> str:
+    """Render a SQLAlchemy URL for a libpq-based CLI tool (pg_dump/pg_restore/
+    psql), not for SQLAlchemy's own create_engine().
+
+    SQLAlchemy's drivername (e.g. "postgresql+psycopg", required by this
+    project's own TEST_DATABASE_URL convention - see README's "Локальная
+    разработка и тесты") is a SQLAlchemy-only convention. libpq's URI parser
+    recognizes only a bare "postgresql://"/"postgres://" scheme; anything
+    else doesn't match and it silently falls back to a local Unix-socket
+    connection attempt instead of raising a clear parse error - see
+    test_restore_roundtrip.py, which shells out to pg_dump/pg_restore
+    directly and needs a URL those binaries can actually parse.
+
+    The userinfo/host/port/database portion is left to URL.render_as_string
+    itself (empirically verified against real libpq parsing - see
+    test_libpq_url.py - to already produce something libpq accepts, space
+    included, even though it isn't strictly RFC 3986). The query string is
+    NOT: render_as_string() encodes it with urllib's quote_plus, which turns
+    a space into "+" - correct for an HTML form/SQLAlchemy's own query-string
+    convention, but libpq's URI parser does not decode "+" back to a space
+    in the query part (unlike the rest of the URI, where a literal "+" and a
+    literal space are just themselves either way - see test_libpq_url.py).
+    A dump/restore target that happens to need a query parameter with a
+    space in its value (e.g. options=-c search_path=...) would otherwise
+    silently receive a corrupted value instead of a parse error. Rebuilt
+    here with plain percent-encoding (quote(..., safe="")) instead.
+    """
+    plain = url.set(drivername="postgresql")
+    query = plain.query
+    if not query:
+        return plain.render_as_string(hide_password=False)
+
+    pairs: list[str] = []
+    for key in sorted(query):
+        values = query[key]
+        if isinstance(values, str):
+            values = (values,)
+        for value in values:
+            pairs.append(f"{quote(str(key), safe='')}={quote(str(value), safe='')}")
+
+    base = plain.set(query={}).render_as_string(hide_password=False)
+    return f"{base}?{'&'.join(pairs)}"
 
 
 # Backward/internal alias kept for readability at call sites in this module.

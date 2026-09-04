@@ -1,0 +1,165 @@
+# CI for vibe-order-infra.
+#
+# Three independent jobs, each exercising a real validation path rather than
+# a smoke import:
+#
+#   backend-tests  - the full pytest suite against a real PostgreSQL service
+#                     container (superuser creds, so the Stage 2 disposable-
+#                     database/role tests - see backend/tests/stage2_db_helpers.py -
+#                     and the Alembic fresh-install/legacy-upgrade/drift tests
+#                     all run for real instead of skipping), dependencies
+#                     installed the same hash-verified way backend/Dockerfile
+#                     installs them.
+#   frontend       - npm ci (lockfile-exact), vitest, a standalone TypeScript
+#                     check, the real production build, and npm audit at
+#                     --audit-level=moderate: moderate-or-higher advisories
+#                     fail the job, low/info do not - "0 vulnerabilities" is
+#                     just the currently observed result of that gate, not
+#                     the gate itself.
+#   containers     - builds the actual backend/Dockerfile and validates
+#                     docker-compose.yml (default and "admin" profile) parses
+#                     with a real .env file, matching the checks documented in
+#                     README.md.
+#
+# No job needs write access to the repo or any secret - this workflow never
+# pushes an image, comments on a PR, or talks to production infrastructure.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-tests:
+    name: Backend tests (pytest + PostgreSQL)
+    runs-on: ubuntu-latest
+    # Matches docker-compose.yml's postgres service version. The service
+    # container's default POSTGRES_USER is a cluster superuser, which is
+    # exactly what tests/stage2_db_helpers.py requires (CREATEDB+CREATEROLE)
+    # to create and tear down its own disposable databases/roles - see that
+    # module's docstring. POSTGRES_DB is set to a name containing "test" so
+    # it satisfies tests/db_safety_guard.py and is used directly as
+    # TEST_DATABASE_URL's target database (tests/conftest.py's db_engine
+    # fixture runs create_all() against it directly, it never creates the
+    # database itself).
+    services:
+      postgres:
+        image: postgres:16.14-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: vibe_orders_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/vibe_orders_test
+    steps:
+      - uses: actions/checkout@v7
+
+      # pg_dump/pg_restore on PATH lets tests/test_restore_roundtrip.py run
+      # its real dump/restore round trip instead of skipping (see that
+      # file's docstring) - matches the postgres:16 service above.
+      - name: Install PostgreSQL client tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.lock.txt
+
+      # Same install path backend/Dockerfile uses for the runtime image
+      # (requirements.lock.txt): fully pinned, hash-verified, no dependency
+      # resolution against the live index. requirements-dev.lock.txt is the
+      # superset that additionally pins the [test] extra (pytest/httpx) -
+      # see tests/test_dependency_lock_consistency.py for the offline
+      # regression that keeps both lock files in sync with pyproject.toml.
+      - name: Install backend dependencies (hash-verified lock file)
+        working-directory: backend
+        run: |
+          pip install --no-cache-dir --require-hashes -r requirements-dev.lock.txt
+          pip install --no-cache-dir --no-deps --no-build-isolation .
+
+      # docker CLI is preinstalled on the ubuntu-latest runner, so
+      # tests/test_compose_hardening.py's `docker compose config` checks run
+      # for real (that suite skips only if the docker CLI is unavailable).
+      - name: Run backend test suite
+        working-directory: backend
+        run: pytest -v
+
+  frontend:
+    name: Frontend (tests + typecheck + build + audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies (npm ci)
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run test suite (vitest)
+        working-directory: frontend
+        run: npm test
+
+      - name: TypeScript check
+        working-directory: frontend
+        run: npx tsc -p tsconfig.json --noEmit
+
+      - name: Production build
+        working-directory: frontend
+        run: npm run build
+
+      # Policy: fail the build on moderate-or-higher severity findings;
+      # low/info-only findings do not fail CI - this is the actual enforced
+      # threshold (see README, "Frontend"/"CI" - "0 vulnerabilities" there
+      # describes one point-in-time audit result, not a stricter gate this
+      # command doesn't enforce).
+      - name: Dependency audit
+        working-directory: frontend
+        run: npm audit --audit-level=moderate
+
+  containers:
+    name: Containers (Docker build + Compose config)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Validates backend/Dockerfile actually builds from a clean checkout -
+      # including the --require-hashes install and the non-root appuser -
+      # which no pytest test exercises (test_compose_hardening.py only
+      # renders docker-compose.yml's config, it never builds an image).
+      - name: Build backend image
+        run: docker build --tag vibe-order-backend:ci ./backend
+
+      # Same commands README.md documents for verifying the Compose file
+      # without starting containers - proves every ${VAR:?...} required
+      # variable is satisfiable and the file parses, for both the default
+      # service set and the optional "admin" (pgAdmin) profile.
+      - name: Validate docker-compose.yml (default services)
+        run: docker compose --env-file .env.example -f docker-compose.yml config --quiet
+
+      - name: Validate docker-compose.yml (admin profile)
+        run: docker compose --env-file .env.example -f docker-compose.yml --profile admin config --quiet

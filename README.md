@@ -18,6 +18,13 @@ static server, HTTPS, Docker Compose, приватный Docker Registry и pgAd
 
 Публичный сайт: **https://vibe.elivcloud.org**
 
+**Навигация:** локальная разработка/тесты — "Локальная разработка и
+тесты"; архитектура — "Архитектура"/"Структура проекта"; CI —
+["CI"](#ci); деплой (dev/CI/production) —
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md); операционный runbook —
+[docs/RUNBOOK.md](docs/RUNBOOK.md); security/privacy/retention —
+"Security notes / ограничения".
+
 ## Целевой сервер
 
 - Ubuntu 24.04, Docker Engine 29.6.2, Docker Compose plugin v5.3.1
@@ -106,7 +113,12 @@ host (backend, PostgreSQL, Registry сегодня так и сделаны, с�
                                             SSH-туннель с локальной машины
 
 (Watchtower удалён из инфраструктуры в Stage 3 — обновления образов теперь
-только явные, ручные: `docker compose pull && docker compose up -d`.)
+только явные, ручные: выбор конкретного immutable release, `docker pull`
+этого тега, явный `docker tag` на локальный alias
+`vibe-order-infra-backend:latest`, затем `docker compose up -d --no-build`
+— см. "Порядок деплоя" → "Обновление / повторный деплой" ниже; не голый
+`docker compose pull && docker compose up -d`, который полагался бы на
+mutable remote `latest` и не запрещал бы build-fallback.)
 ```
 
 Ключевые инварианты:
@@ -140,16 +152,27 @@ vibe-order-infra/
 ├── .env.example
 ├── .gitignore
 ├── README.md
+├── .github/workflows/ci.yml # GitHub Actions CI — см. раздел "CI" ниже
+├── docs/
+│   ├── DEPLOYMENT.md        # процедура деплоя (dev/CI/production)
+│   └── RUNBOOK.md           # операционный runbook
 ├── backend/
 │   ├── app/
-│   │   ├── core/            # config (pydantic-settings), database (engine/session/Base), exceptions
-│   │   ├── models/          # SQLAlchemy ORM: Admin, Application, BehaviorMetric, AdminSetting
+│   │   ├── core/            # config (pydantic-settings), database (engine/session/Base),
+│   │   │                    #   schema_check (fail-closed readiness guard), exceptions
+│   │   ├── models/          # SQLAlchemy ORM: Admin, Application, BehaviorMetric, AdminSetting, ...
 │   │   ├── schemas/         # Pydantic Create/Update/Read + бизнес-валидация
 │   │   ├── crud/            # доступ к БД, без HTTP-специфики
 │   │   ├── routes/          # HTTP-обработчики (/api/applications, /api/behavior-metrics,
 │   │   │                    #   /api/admin-settings, /api/auth, /api/analytics)
-│   │   └── main.py          # FastAPI app, lifespan (create_all), сборка /api-роутера
-│   ├── tests/                # pytest: unit (schemas, db safety guard) + integration (реальный PostgreSQL)
+│   │   ├── services/        # application scoring, behavior analytics
+│   │   ├── db_admin/        # bootstrap_roles.py, adopt_legacy.py — Stage 2 DB lifecycle
+│   │   ├── cli.py           # оператор CLI (bootstrap-admin)
+│   │   └── main.py          # FastAPI app, lifespan (schema readiness guard), сборка /api-роутера
+│   ├── alembic/              # Alembic-миграции (versions/, env.py)
+│   ├── alembic.ini
+│   ├── tests/                # pytest: unit + integration (реальный PostgreSQL)
+│   ├── healthcheck.py         # Docker HEALTHCHECK (GET /api/ready изнутри контейнера)
 │   ├── Dockerfile
 │   └── pyproject.toml
 ├── frontend/
@@ -214,9 +237,15 @@ vibe-order-infra/
 `ConflictError`/`DomainValidationError` в коды 409/422) → `core/`
 (конфигурация, engine/session, доменные исключения).
 
-Таблицы на текущем учебном этапе создаются напрямую через
-`Base.metadata.create_all()` при старте приложения (`lifespan` в
-`app/main.py`). Alembic-миграции пока не используются.
+Схема управляется Alembic-миграциями (`backend/alembic/versions/`, четыре
+ревизии на текущий момент) — `Base.metadata.create_all()` больше не
+используется. Старт приложения (`lifespan` в `app/main.py`) — read-only
+проверка (`app/core/schema_check.py`), которая отказывает в старте, если
+подключенная схема не совпадает с ожидаемой текущей ревизией, а не
+пытается сама что-то создать/поправить. Подробная процедура (роли,
+one-shot DB-lifecycle сервисы, свежая установка и усыновление legacy-базы)
+— [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md), раздел "Provisioning базы
+данных".
 
 ## Frontend
 
@@ -460,14 +489,25 @@ fallback (см. "Nginx" ниже) и получают тот же `200` с `inde
 Сервисы: `postgres`, `backend`, `nginx`, `registry`, `pgadmin` (профиль
 `admin`).
 
-**backend**: Compose-декларация — `build: ./backend` (build context для
-локальной разработки и для самого первого bootstrap, когда локального
-image еще нет). Фактическая production-доставка — отдельная: release
-image собирается вне VPS для `linux/amd64` и доставляется через private
-Registry (`registry-vibe.elivcloud.org`) с immutable tag, на VPS
-выполняется `docker pull`, а не `docker compose build` (см. "Порядок
-деплоя" ниже); сети — `app-net` (доступ к `postgres`) и `proxy-net`
-(доступность для Nginx); порт 8000 НЕ публикуется на host (нет `ports:`);
+**backend**: Compose-декларация — `build: ./backend` (build context
+только для локальной разработки — `docker compose up`/`build` на
+ноутбуке разработчика). На production VPS этот `build:` фактически не
+используется никогда — ни при первом деплое, ни при последующих
+обновлениях: production-доставка всегда идет как явный `--no-build`
+поверх уже присутствующего локально тега `vibe-order-infra-backend:latest`
+(см. "Порядок деплоя" ниже — единая модель для первого деплоя, обновления
+и rollback: образ детерминированно оказывается на VPS под immutable-
+идентификатором, ретегируется на этот локальный тег, и только потом
+`docker compose up -d --no-build` создает/пересоздает контейнер). При
+первом деплое, когда ни Registry, ни сам backend на VPS еще не
+существуют, образ доставляется не через `docker pull` (Registry еще
+физически недостижим снаружи — см. "Первый деплой (bootstrap)"), а как
+versioned artifact с контрольной суммой, тем же принципом, что и
+`frontend/dist` (см. "Production build frontend"); при последующих
+обновлениях/откате — через `docker pull`/`docker tag` из уже работающего
+Registry (`registry-vibe.elivcloud.org`); сети — `app-net` (доступ к
+`postgres`) и `proxy-net` (доступность для Nginx); порт 8000 НЕ
+публикуется на host (нет `ports:`);
 лимит памяти 192M (reservation 128M, 0.50 cpu). Stage 3: `healthcheck`
 через `backend/healthcheck.py` (stdlib `urllib`, обращается к
 `GET /api/ready` на `127.0.0.1:8000` изнутри контейнера) — см. "Backend
@@ -505,10 +545,26 @@ protection").
 
 Обязательны:
 
-- `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` — используются
-  контейнером `postgres` и, с теми же значениями, контейнером `backend`
-  (подключается к `postgres:5432` по этим же учетным данным; отдельных
-  backend-специфичных переменных не требуется).
+- `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` — кластерный
+  bootstrap/admin-креденшл. Начиная со Stage 2 backend **им не
+  пользуется** — только контейнер `postgres` (первичная инициализация
+  кластера) и одноразовые сервисы `db-roles-bootstrap`/`db-roles-finalize`
+  (`app/db_admin/bootstrap_roles.py`), а также ручной
+  `app/db_admin/adopt_legacy.py` при усыновлении legacy-базы.
+- `MIGRATION_DB_USER`, `MIGRATION_DB_PASSWORD` — миграционная/владеющая
+  роль. Единственная роль, от имени которой когда-либо подключается
+  Alembic (сервис `db-migrate`, `backend/alembic/env.py`) — `CREATE`/
+  `USAGE` на схему `public`, не суперпользователь.
+- `APP_DB_USER`, `APP_DB_PASSWORD` — runtime-роль. Единственная роль, от
+  имени которой backend подключается к БД в обычной работе
+  (`app/core/config.py`). Без прав DDL и без доступа к `alembic_version`
+  (см. `app/db_admin/bootstrap_roles.py` и
+  `backend/tests/test_db_role_privileges.py`).
+  Три роли выше — не взаимозаменяемые вкусы одного и того же креденшла:
+  они разделены намеренно, чтобы ни backend, ни сама Alembic-миграция не
+  располагали правами сверх необходимых им — подробнее и с точным списком
+  grants см. [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md), раздел
+  "Конфигурация и переменные окружения".
 - `PGADMIN_DEFAULT_EMAIL`, `PGADMIN_DEFAULT_PASSWORD` (нужны, только если
   запускается профиль `admin`, но объявлены обязательными и там).
 - `JWT_SECRET_KEY` — секрет для подписи JWT (`app/core/config.py`,
@@ -594,9 +650,38 @@ npm run build
 npm audit
 ```
 
-Итог: **469 tests passed**, `npm run build` — успешно, `npm audit` — **0
-vulnerabilities**. Покрытие тестами (coverage) не измерялось — количество
-тестов не эквивалентно проценту покрытия кода.
+Итог: **469 tests passed**, `npm run build` — успешно, `npm audit` (без
+флагов, все severity) — **0 vulnerabilities** на момент этой проверки.
+Это результат конкретного прогона, не гарантия на будущее и не то же
+самое, что порог, который реально enforced в CI — см. "CI" ниже. Покрытие
+тестами (coverage) не измерялось — количество тестов не эквивалентно
+проценту покрытия кода.
+
+## CI
+
+GitHub Actions (`.github/workflows/ci.yml`), три независимых job'а на
+каждый push/PR в `main`:
+
+- **backend-tests** — полный `pytest` против реального `postgres:16.14-alpine`
+  service-контейнера (не mock — те же интеграционные тесты, что и
+  локально, включая Alembic fresh-install/legacy-upgrade/drift и реальный
+  `pg_dump`/`pg_restore` round-trip), зависимости ставятся из
+  hash-verified lock-файла тем же способом, что и `backend/Dockerfile`.
+- **frontend** — `npm ci` → `vitest` → `tsc --noEmit` → `npm run build` →
+  `npm audit --audit-level=moderate` (реальная политика: сборка падает на
+  находках severity `moderate` и выше; `low`/`info` не блокируют CI — это
+  принятый практический порог, не буквальный "ноль уязвимостей любой
+  критичности" — прогон выше просто зафиксировал, что на тот момент их не
+  было ни одной, а не то, что low-severity находки где-то отдельно
+  запрещены политикой).
+- **containers** — реальная сборка `backend/Dockerfile` и валидация
+  `docker-compose.yml` (`docker compose config`, включая профиль `admin`)
+  тем же способом, что описан в разделе "Обязательные переменные
+  окружения" выше.
+
+CI не разворачивает production-инфраструктуру и не требует секретов —
+service-контейнер PostgreSQL одноразовый, его учётные данные фиктивны и
+уничтожаются вместе с job'ом.
 
 ## Production build frontend
 
@@ -653,7 +738,20 @@ Nginx раздает `frontend/dist` через read-only bind mount
 повторного/дополнительного bootstrap. Registry **не считается готовым к
 запуску** без файла `registry/auth/htpasswd` — до его появления контейнер
 стартует, но любой запрос к Registry будет отклонен на этапе аутентификации
-(это ожидаемо и правильно, а не баг):
+(это ожидаемо и правильно, а не баг).
+
+**Почему здесь не просто `docker compose up -d`.** `backend` (и три
+one-shot DB-lifecycle сервиса, ссылающиеся на тот же тег — см. "Docker
+Compose" выше) объявляют `build: ./backend`. Если тег
+`vibe-order-infra-backend:latest` еще не существует локально на VPS (а на
+по-настоящему первом деплое его там нет), голый `docker compose up -d`
+собрал бы образ **прямо на VPS** — противоречит задокументированной
+production-модели ("образ собирается вне VPS", см. "Docker Compose" выше)
+и недетерминированно (два first-deploy запуска, разделенные любым
+изменением в `backend/`, дали бы два разных образа без единого
+проверяемого тега). Поэтому первый деплой явно доставляет на VPS
+конкретный, заранее собранный образ и запускает Compose с `--no-build`, не
+полагаясь на build-fallback:
 
 1. **Создать `.env`** на VPS (`cp .env.example .env`, заполнить реальными
    значениями — НЕ теми, что в примере).
@@ -666,7 +764,76 @@ Nginx раздает `frontend/dist` через read-only bind mount
    нигде не сохраняет.
 4. **Убедиться, что файл создан**: `ls -l registry/auth/htpasswd` (права
    должны быть `600`).
-5. **Только теперь** `docker compose up -d` (без профиля `admin`).
+5. **Собрать release image вне VPS**, immutable tag, сразу под тем же
+   именем, что использует Registry (тот же принцип, что и "Обновление /
+   повторный деплой" ниже) — `--load` гарантирует, что образ реально
+   попадёт в локальный Docker этой build-машины, а не только в кэш
+   builder'а, что нужно для следующего шага (`docker save`):
+   ```bash
+   docker buildx build --platform linux/amd64 --load \
+     -t registry-vibe.elivcloud.org/vibe-order-infra/backend:<immutable-tag> \
+     ./backend
+   docker image inspect registry-vibe.elivcloud.org/vibe-order-infra/backend:<immutable-tag> \
+     --format '{{.Id}}'   # записать это значение - понадобится на шаге 8
+   ```
+6. **Доставить этот образ на VPS.** `docker pull` из
+   `registry-vibe.elivcloud.org` здесь еще не вариант: Registry снаружи
+   достижим только через Nginx по HTTPS, а Nginx сам объявляет
+   `depends_on: backend: condition: service_healthy` (см. "Docker Compose"
+   выше и `docker-compose.yml`) — на VPS еще нет ни одного контейнера
+   `backend`, значит Nginx еще не поднимется, значит Registry еще
+   недостижим снаружи. Вместо `pull` используется тот же принцип
+   "versioned artifact + sha256", что и для `frontend/dist` (см.
+   "Production build frontend" выше):
+   ```bash
+   docker save registry-vibe.elivcloud.org/vibe-order-infra/backend:<immutable-tag> | gzip \
+     > "backend-<immutable-tag>.tar.gz"
+   sha256sum "backend-<immutable-tag>.tar.gz" \
+     > "backend-<immutable-tag>.tar.gz.sha256"
+   scp "backend-<immutable-tag>.tar.gz"* vibe-vps:/tmp/
+   ```
+7. **На VPS: проверить контрольную сумму и только потом загрузить образ**
+   — тот же принцип "без окна недоверенного состояния", что и у
+   frontend-доставки:
+   ```bash
+   cd /tmp
+   sha256sum -c "backend-<immutable-tag>.tar.gz.sha256"
+   docker load < "backend-<immutable-tag>.tar.gz"
+   ```
+8. **Валидировать идентичность загруженного образа** (не доверять голому
+   факту, что `docker load` не упал с ошибкой) и только потом переключить
+   на него локальный тег, который читает Compose-декларация:
+   ```bash
+   docker image inspect registry-vibe.elivcloud.org/vibe-order-infra/backend:<immutable-tag> \
+     --format '{{.Id}}'
+   # сверить с Image Id, записанным на build-машине на шаге 5 - должны совпадать
+   docker tag registry-vibe.elivcloud.org/vibe-order-infra/backend:<immutable-tag> \
+     vibe-order-infra-backend:latest
+   ```
+9. **Только теперь** `docker compose up -d --no-build` (без профиля
+   `admin`) — `--no-build` запрещает Compose собирать образ на VPS, даже
+   если бы локальный тег `vibe-order-infra-backend:latest` оказался по
+   какой-то причине отсутствующим (команда откажет явно вместо тихого
+   локального build); при наличии тега (шаг 8 уже его создал) это
+   автоматически поднимает всю цепочку database lifecycle в правильном
+   порядке (`db-roles-bootstrap` → `db-migrate` → `db-roles-finalize` →
+   `backend`, через `depends_on: condition: service_completed_successfully`/
+   `service_healthy`), без ручных дополнительных шагов — подробнее и про
+   усыновление уже существующей (legacy) production-базы см.
+   [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md), раздел "Provisioning базы
+   данных".
+10. **(День 2, опционально, но рекомендуется).** Как только Nginx и
+    Registry реально подняты, здоровы и TLS выпущен (см. следующий пункт
+    ниже и "Registry — подтверждено полным push/pull smoke-test'ом" в
+    "Почему так"), запушить тот же самый immutable tag в Registry:
+    ```bash
+    docker push registry-vibe.elivcloud.org/vibe-order-infra/backend:<immutable-tag>
+    ```
+    Тег уже собран под правильным именем на шаге 5 — дополнительный
+    `docker tag` не нужен. Это делает образ доступным для будущего
+    `docker pull` (например, для восстановления на другом VPS) тем же
+    путем, что и все последующие релизы (см. "Обновление / повторный
+    деплой" ниже), без повторного `docker save`/`scp`.
 
 Выпуск TLS-сертификатов и включение HTTPS — отдельный шаг после этого
 порядка (certbot на VPS, затем перезапуск Nginx); на текущем VPS уже
@@ -677,10 +844,10 @@ Nginx раздает `frontend/dist` через read-only bind mount
 Этот flow — не одноразовая процедура «добавить таблицу `admins`», а
 повторяемая процедура для **любого** будущего обновления backend/frontend.
 Backup PostgreSQL перед обновлением обязателен только тогда, когда релиз
-меняет схему БД (добровольная DDL-операция через
-`Base.metadata.create_all()` — см. "Ограничение: развертывание базы
-данных" ниже); для чисто frontend-релиза или backend-релиза без изменений
-схемы этот шаг не обязателен, но не будет лишним.
+меняет схему БД (новая Alembic-ревизия в `backend/alembic/versions/` — см.
+"Ограничение: развертывание базы данных" ниже); для чисто frontend-релиза
+или backend-релиза без изменений схемы этот шаг не обязателен, но не будет
+лишним.
 
 **Backend (собран вне VPS, доставлен через private Registry):**
 
@@ -715,7 +882,25 @@ Backup PostgreSQL перед обновлением обязателен тол�
    registry-vibe.elivcloud.org/vibe-order-infra/backend:<immutable-tag>
    vibe-order-infra-backend:latest`), чтобы `docker compose up -d --no-build
    --no-deps backend` использовал его, а не запускал build.
-8. Пересоздать **только** backend:
+8. **Применить миграции ДО пересоздания backend** — новый образ несёт
+   новые файлы миграций (`backend/alembic/versions/`), но сам их не
+   применяет: старт backend — это только read-only проверка схемы
+   (`app/core/schema_check.py`), которая **откажет в старте**, если схема
+   ещё не на той ревизии, которую ожидает новый код. Тот же локальный тег
+   `vibe-order-infra-backend:latest`, что и у backend, используют и три
+   one-shot DB-lifecycle сервиса — таргетируем последний в цепочке, Compose
+   поднимает зависимости (`db-roles-bootstrap` → `db-migrate`) сам:
+   ```bash
+   docker compose up -d --no-build db-roles-finalize
+   docker compose ps --all   # db-roles-bootstrap/db-migrate/db-roles-finalize — Exited (0);
+                              # обычный "ps" без --all скрывает остановленные
+                              # one-shot контейнеры вместо того, чтобы показать
+                              # их "Exited (0)"
+   ```
+   Безопасно и дёшево выполнять этот шаг при каждом релизе, даже если он не
+   меняет схему: `bootstrap_roles.py` идемпотентен, а `alembic upgrade head`
+   на уже актуальной схеме — no-op (см. `backend/tests/test_migrations_fresh_install.py`).
+9. Пересоздать **только** backend:
    ```bash
    docker compose up -d --no-build --no-deps backend
    ```
@@ -724,38 +909,36 @@ Backup PostgreSQL перед обновлением обязателен тол�
    через `docker pull`/`docker tag` image. `--no-deps` не поднимает и не
    затрагивает зависимости backend (`postgres` из `depends_on`) — Compose
    не проверяет и не трогает healthcheck `postgres`, а просто пересоздает
-   контейнер backend на уже работающей БД. Пересоздается только backend;
-   остальные сервисы — `nginx`, `postgres`, `registry`, `pgadmin` — не
-   перезапускаются этим шагом. Если релиз меняет схему БД,
-   при старте backend вызовет `Base.metadata.create_all()` — создаст
-   отсутствующие таблицы, существующие таблицы/данные не затрагивает.
+   контейнер backend на уже работающей БД (и уже применённой миграции —
+   см. шаг 8). Пересоздается только backend; остальные сервисы — `nginx`,
+   `postgres`, `registry`, `pgadmin` — не перезапускаются этим шагом.
 
 **Frontend (собран вне VPS, см. "Production build frontend" выше):**
 
-9. Собрать `frontend/dist` на build-машине, передать на VPS как
-   версионированный artifact с SHA-256 контрольной суммой, опубликовать
-   hashed assets без удаления старых, затем атомарно заменить `index.html`
-   — полная процедура и обоснование порядка — см. "Production build
-   frontend" выше.
+10. Собрать `frontend/dist` на build-машине, передать на VPS как
+    версионированный artifact с SHA-256 контрольной суммой, опубликовать
+    hashed assets без удаления старых, затем атомарно заменить `index.html`
+    — полная процедура и обоснование порядка — см. "Production build
+    frontend" выше.
 
 **Nginx (только если конфигурация меняется в этом релизе):**
 
-10. `nginx -t` **обязательно ДО** применения новой конфигурации — не после
+11. `nginx -t` **обязательно ДО** применения новой конфигурации — не после
     и не одновременно с ней.
-11. Если `nginx -t` прошел — применить **только graceful reload**, без
+12. Если `nginx -t` прошел — применить **только graceful reload**, без
     recreate контейнера: `docker compose exec nginx nginx -s reload` (или
     `docker compose kill -s HUP nginx`). Пересоздание/restart контейнера
     Nginx для смены конфигурации не требуется и не выполняется.
-12. Если `nginx -t` НЕ прошел — не применять reload, откатить
+13. Если `nginx -t` НЕ прошел — не применять reload, откатить
     `nginx/conf.d/*.conf` до валидного состояния.
 
 **После обновления любого компонента:**
 
-13. Smoke tests — см. "Production smoke checklist" ниже (публикация `/admin`,
+14. Smoke tests — см. "Production smoke checklist" ниже (публикация `/admin`,
     protected API без токена → `401`, `/docs`/`/openapi.json`/`/redoc`
     снаружи недоступны и т.д.).
-14. `docker compose ps` — все сервисы в статусе `running`/`healthy`.
-15. `docker stats --no-stream` — сверить фактическое потребление
+15. `docker compose ps` — все сервисы в статусе `running`/`healthy`.
+16. `docker stats --no-stream` — сверить фактическое потребление
     памяти/CPU с лимитами (см. "Resource protection").
 
 `docker compose down` не используется как часть стандартного flow
@@ -766,24 +949,17 @@ RAM около 1 GB build-процесс (особенно TypeScript/Vite ил�
 compilation) конкурирует за память с работающими сервисами и рискует
 уронить их по OOM.
 
-## Ограничение: развертывание базы данных (Alembic отсутствует)
+## Ограничение: развертывание базы данных
 
-- Alembic-миграции в проекте пока не используются.
-- Backend вызывает `Base.metadata.create_all()` при старте (`lifespan` в
-  `app/main.py`) — этот вызов создает только отсутствующие таблицы и НЕ
-  удаляет и не изменяет существующие таблицы/данные.
-- При первом запуске текущей версии backend на существующей production-базе
-  была создана недостающая таблица `admins` — остальные таблицы
-  (`applications`, `behavior_metrics`, `admin_settings`) и их данные
-  остались нетронутыми.
-- Тем не менее, **перед каждым обновлением production, меняющим схему БД,
-  обязателен backup PostgreSQL** — `create_all()` осознанно принят для
-  текущего учебного этапа именно при этом условии, а не как замена
-  миграциям в общем случае. Это правило действует для любого будущего
-  релиза со схемными изменениями, а не только для того релиза, что впервые
-  добавил таблицу `admins`.
-- Для полноценного production-grade развития схемы БД в дальнейшем
-  запланирован переход на Alembic (см. "Дальше по плану").
+Схема управляется Alembic-миграциями (`backend/alembic/versions/`) через
+трёхролевую модель прав (кластерный admin / migration-owner / runtime
+app) — полная процедура, включая свежую установку и усыновление legacy-базы,
+описана в [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md), раздел "Provisioning
+базы данных"; операционные инциденты (неудачная миграция, restore) —
+[docs/RUNBOOK.md](docs/RUNBOOK.md). Здесь — только backup-процедура,
+обязательная **перед каждым обновлением production, меняющим схему БД**
+(это правило действует для любого будущего релиза со схемными изменениями,
+а не только для исторически первого).
 
 Backup — вне репозитория, с конкретным именем файла (без wildcard), без
 раскрытия credentials в самой команде (значения читаются из переменных
@@ -796,30 +972,58 @@ install -d -m 700 "$backup_dir"
 
 backup_file="$backup_dir/backup-before-<release-tag>-$(date +%Y%m%d-%H%M%S).sql"
 
-docker compose exec -T postgres sh -c \
-  'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' \
-  > "$backup_file"
-
-test -s "$backup_file"
-ls -lh "$backup_file"
+# --clean --if-exists - нужно для restore-модели в RUNBOOK.md ("Restore
+# PostgreSQL": восстановление в заведомо чистую, только что пересозданную
+# базу - НЕ прямо поверх текущей, см. этот раздел про то, почему).
+#
+# Оба условия обязательны: pg_dump exit 0 И $backup_file непустой (shell-
+# редирект ">" обнуляет $backup_file ДО запуска pg_dump - упавший НЕ сразу
+# pg_dump уже успевает записать обрезанный, но непустой файл; "test -s" в
+# одиночку принял бы такой файл как валидный). Форма "if pg_dump ...; then"
+# (а не "cmd; status=$?") обязательна для безопасности под "set -e" - если
+# вызывающий deploy-скрипт уже включил "set -e", команда-условие "if" не
+# триггерит errexit при падении, а вот отдельная строка "status=$?" после
+# упавшей команды никогда не выполнилась бы, оставив обрезанный дамп под
+# нормальным именем backup'а и без карантина (см. docs/RUNBOOK.md, "Backup
+# PostgreSQL" - там же эмпирическая проверка под обоими режимами). Никакого
+# "|| true" - падение здесь обязано реально останавливать деплой.
+if docker compose exec -T postgres sh -c \
+     'pg_dump --clean --if-exists -U "$POSTGRES_USER" "$POSTGRES_DB"' \
+     > "$backup_file"
+then
+  if [ -s "$backup_file" ]; then
+    ls -lh "$backup_file"
+  else
+    echo "backup FAILED (pg_dump exited 0 but wrote no data) - do not proceed" >&2
+    mv "$backup_file" "$backup_file.incomplete" 2>/dev/null || rm -f "$backup_file"
+    exit 1
+  fi
+else
+  dump_status=$?
+  echo "backup FAILED (pg_dump exit=$dump_status) - do not proceed" >&2
+  mv "$backup_file" "$backup_file.incomplete" 2>/dev/null || rm -f "$backup_file"
+  exit 1
+fi
 ```
 
 `$backup_file` — единственная переменная, указывающая на конкретный,
-только что созданный файл: последующая проверка (`test -s`) относится
-именно к нему, а не к произвольному файлу, попавшему под маску. Каталог
+только что созданный файл: последующая проверка относится именно к нему, а
+не к произвольному файлу, попавшему под маску. Каталог
 `$HOME/vibe-order-infra-backups` — вне рабочей копии репозитория (не
 коммитится и не может быть случайно закоммичен), права `700` ограничивают
 доступ к бэкапам (внутри — дамп БД, потенциально чувствительные данные
 заявок) только владельцу.
 
-**Если `test -s "$backup_file"` возвращает ненулевой код (файла нет или он
-пустой) — НЕ продолжать деплой.** Это жёсткий стоп-критерий, не
-рекомендация: `Base.metadata.create_all()` не заменяет полноценные
-миграции (см. выше), и без подтверждённого непустого backup откатываться
-в случае проблемы с обновлением будет нечем. Сам процесс НЕ включает
-автоматический rollback — восстановление из `$backup_file` в случае
-проблемы выполняется вручную (`psql`/`pg_restore` по обстоятельствам), это
-не одношаговая операция и не описывается здесь как таковая.
+**Если код возврата `pg_dump` ненулевой ИЛИ `$backup_file` пуст — НЕ
+продолжать деплой** (см. код выше — это уже enforced, не только
+рекомендация). Это жёсткий стоп-критерий, не рекомендация: без
+подтверждённого непустого backup откатываться в случае проблемы с
+обновлением будет нечем (Alembic-миграции в этом репозитории не имеют
+проверенных `downgrade()`-путей — откат схемы назад не поддерживается
+инструментарием, только restore из backup). Сам процесс НЕ включает
+автоматический rollback — полная процедура restore, включая зависимость от
+того, какой ревизии Alembic соответствует backup, —
+[docs/RUNBOOK.md](docs/RUNBOOK.md), раздел "Restore PostgreSQL".
 
 ## First production admin
 
@@ -1122,8 +1326,11 @@ Watchtower (`nickfedor/watchtower`) в label-based opt-in режиме — на 
 через Docker API (флаг `:ro` на монтировании ограничивает только замену
 самого файла сокета, не вызовы API через него). Stage 3 убрал Watchtower и
 этот docker.sock-mount из репозитория целиком: обновления образов теперь
-только явные, ручные (`docker compose pull && docker compose up -d`), без
-постоянно работающего привилегированного контейнера, слушающего Docker API.
+только явные, ручные — выбор immutable release, `docker pull` конкретного
+тега, явный `docker tag` на локальный alias `vibe-order-infra-backend:latest`
+и `docker compose up -d --no-build` (полная процедура — "Порядок деплоя" →
+"Обновление / повторный деплой" выше), без постоянно работающего
+привилегированного контейнера, слушающего Docker API.
 
 **Backend healthcheck и readiness (Stage 3).** У backend теперь есть
 Docker `HEALTHCHECK` (см. `backend/Dockerfile`, `backend/healthcheck.py`) —
@@ -1219,13 +1426,20 @@ json-file` с `max-size: "10m"`, `max-file: "3"` — до ~30MB логов на
 Для `backend` — две разные, не противоречащие друг другу вещи:
 
 - **Compose declaration** (`docker-compose.yml`): `build: ./backend` — build
-  context для локальной разработки и для самого первого bootstrap.
-- **Production delivery**: текущий production release доставлен не через
-  локальный `docker compose build` на VPS, а через private Registry —
-  release image собран вне VPS для `linux/amd64` и запушен с immutable tag
-  в `registry-vibe.elivcloud.org`, на VPS выполнен `docker pull` этого
-  image (см. "Порядок деплоя" ниже — этот же принцип применяется к каждому
-  будущему релизу backend, не только к текущему).
+  context только для локальной разработки.
+- **Production delivery**: ни один production release, включая самый
+  первый, не собирается на VPS. Текущий production release доставлен через
+  private Registry — release image собран вне VPS для `linux/amd64` и
+  запушен с immutable tag в `registry-vibe.elivcloud.org`, на VPS выполнен
+  `docker pull` этого image, затем `docker tag` на локальный тег
+  `vibe-order-infra-backend:latest`, затем `docker compose up -d
+  --no-build` (см. "Порядок деплоя" ниже — этот же принцип применяется к
+  каждому будущему релизу backend). Самый первый деплой на этом VPS
+  использовал тот же принцип "образ собран вне VPS + детерминированный
+  локальный тег + `--no-build`", но доставлял образ через `docker
+  save`/`scp`/`docker load` вместо `docker pull`, поскольку Registry на тот
+  момент еще не был снаружи достижим (см. "Первый деплой (bootstrap)"
+  выше).
 
 Совместимость Registry v3.1.1 с текущей конфигурацией проверена по
 официальной документации (см. раздел "Почему так") перед указанием версий
@@ -1245,11 +1459,11 @@ json-file` с `max-size: "10m"`, `max-file: "3"` — до ~30MB логов на
 - Swagger/OpenAPI/Redoc закрыты Nginx на production-периметре независимо от
   auth-стадии — backend их сам не защищает и не отключает (нужны для
   локальной разработки/тестов).
-- Автоматические миграции БД через Alembic пока не внедрены;
-  `Base.metadata.create_all()` — осознанное решение для текущего учебного
-  этапа, принятое строго при условии обязательного backup PostgreSQL перед
-  каждым обновлением production (см. "Ограничение: развертывание базы
-  данных").
+- Схема БД управляется Alembic-миграциями с трёхролевой моделью прав
+  (кластерный admin / migration-owner / runtime app) — backup PostgreSQL
+  перед каждым обновлением production, меняющим схему, остаётся
+  обязательным (нет проверенных `downgrade()`-путей — см. "Ограничение:
+  развертывание базы данных" и [docs/RUNBOOK.md](docs/RUNBOOK.md)).
 - Behavior-аналитика — первого рода (без сторонних сервисов), локальна и
   агрегирована; точные координаты курсора и содержимое полей формы не
   собираются. Пользователю показывается краткое уведомление о сборе данных
@@ -1306,8 +1520,10 @@ json-file` с `max-size: "10m"`, `max-file: "3"` — до ~30MB логов на
   их "unhealthy" (`healthcheck: disable: true`).
 
 Проект в целом — учебный: инфраструктура и подход к security сделаны
-production-like, но проект не претендует на полную production-readiness (нет
-миграций схемы через Alembic, нет автообновления сертификата).
+production-like, но проект не претендует на полную production-readiness
+(нет автообновления сертификата, нет CD/автоматического деплоя — обновления
+production по-прежнему выполняются оператором вручную по процедуре из
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)).
 
 ## Отличия от буквальной формулировки задания
 
@@ -1348,13 +1564,19 @@ production VPS**; полная ручная приемка пройдена (с�
 приемка").
 Из содержательного остается:
 
-1. Внедрить Alembic-миграции вместо `Base.metadata.create_all()` — нужно
-   для безопасной эволюции схемы БД в будущем.
+1. ~~Внедрить Alembic-миграции вместо `Base.metadata.create_all()`~~ —
+   сделано: полный Stage 2 database lifecycle (Alembic, трёхролевая модель
+   прав, one-shot DB-lifecycle сервисы, усыновление legacy-базы) — см.
+   [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 2. ~~Точечный opt-in Watchtower-label для backend~~ — снято с повестки:
    Watchtower удален из инфраструктуры целиком в Stage 3 (см. "Почему
    так"), обновления образов теперь только явные/ручные.
 3. Автоматизировать продление сертификата Let's Encrypt (cron/systemd timer
    с `certbot renew`) — в рамках текущего деплоя настраивался только
    первичный выпуск.
-4. HSTS — включить отдельным шагом после более длительного периода
-   стабильной работы HTTPS.
+4. ~~HSTS~~ — сделано (Stage 4, см. "Security notes / ограничения" выше).
+5. CI (GitHub Actions, `.github/workflows/ci.yml`) — реализован (Stage 5,
+   см. раздел "CI" ниже); CD/автоматический деплой на VPS по-прежнему не
+   реализован и не планируется в рамках этого учебного проекта — production
+   обновляется вручную оператором по процедуре из
+   [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
