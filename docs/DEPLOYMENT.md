@@ -1,12 +1,16 @@
 # Деплой vibe-order-infra
 
-Этот документ описывает, как поднять vibe-order-infra в трёх разных
-контекстах — локальная разработка, CI и production VPS — и чем они
-отличаются. Архитектура, security-инварианты, полная API allowlist-матрица
-и историческая production-приемка уже подробно описаны в
-[README.md](../README.md); здесь — только процедуры. Операционные события
-после деплоя (сбой старта, восстановление из backup, ротация секретов и
-т.п.) — в [RUNBOOK.md](RUNBOOK.md).
+Этот документ — источник истины для процедур деплоя (локальная разработка,
+CI, production VPS) и для чеклиста приёмки после деплоя (см. "Текущий
+чеклист приёмки после деплоя" ниже — актуален для сегодняшнего
+репозитория). Подробные пошаговые команды релиза (сборка/доставка образа
+backend, полный порядок первого деплоя) пока остаются в README, "Порядок
+деплоя" — этот файл на них ссылается, а не дублирует их. Архитектура,
+границы доверия и ролевая модель БД — в [ARCHITECTURE.md](ARCHITECTURE.md);
+security-инварианты, полная API allowlist-матрица и историческая (commit
+`7547704`) production-приемка — в [README.md](../README.md). Операционные
+события после деплоя (сбой старта, восстановление из backup, ротация
+секретов и т.п.) — в [RUNBOOK.md](RUNBOOK.md).
 
 ## Три окружения
 
@@ -320,15 +324,20 @@ image.
   (включая эти три), так что без `--all` они просто отсутствуют в выводе,
   а не показываются как `Exited (0)`.
 
-Проверка после деплоя описана также в README, "Production smoke checklist"
-— тот чеклист остаётся источником истины для полного функционального
-приёмочного прогона; здесь — минимальный технический health-check:
+Минимальный технический health-check (быстрая проверка, не полная
+приёмка):
 
 ```bash
 docker compose ps --all
 curl -fsS https://<домен>/api/health
 docker compose exec backend python healthcheck.py && echo "backend ready"
 ```
+
+Полная процедура приёмки для текущего репозитория — раздел "Текущий
+чеклист приёмки после деплоя" ниже. Исторический чеклист в README
+("Historical production smoke checklist", commit `7547704`) для
+сегодняшнего деплоя не источник истины — он ссылается на
+`POST /api/auth/register`, которого в текущем коде больше нет.
 
 ## TLS / reverse-proxy
 
@@ -370,9 +379,9 @@ docker compose ps --all   # db-roles-bootstrap / db-migrate / db-roles-finalize 
 # 5. Только теперь пересоздать backend на новом образе.
 docker compose up -d --no-build --no-deps backend
 
-# 6. Smoke-проверка (см. "Health / readiness" выше и README, "Production
-#    smoke checklist"), docker stats --no-stream (см. README, "Resource
-#    protection").
+# 6. Smoke-проверка (см. "Текущий чеклист приёмки после деплоя" ниже —
+#    НЕ исторический чеклист в README), docker stats --no-stream (см.
+#    README, "Resource protection").
 ```
 
 Frontend/Nginx-обновления — без изменений относительно README (шаги
@@ -381,13 +390,91 @@ Frontend/Nginx-обновления — без изменений относит
 
 `docker compose down` не используется как часть обновления — см. README.
 
-## Проверка после деплоя
+## Текущий чеклист приёмки после деплоя (current-state smoke checklist)
 
-Минимум: `docker compose ps --all` (все `healthy`/`Exited (0)` где ожидается
-— обычный `ps` без `--all` скрывает остановленные one-shot контейнеры
-вместо того, чтобы показать их `Exited (0)`),
-`GET /api/health` снаружи через HTTPS, `docker compose exec backend python
-healthcheck.py`. Полный функциональный чеклист (auth, CRUD, приоритизация,
-аналитика, закрытые технические эндпоинты) — README, "Production smoke
-checklist". Операционные проблемы после деплоя (сбой старта, недоступная
-БД, неудачная миграция, откат) — [RUNBOOK.md](RUNBOOK.md).
+Этот чеклист — источник истины для приёмки любого текущего/будущего
+деплоя (production и, где применимо, локального стека) и проверяет
+поведение **текущего** репозитория: публичной HTTP-регистрации
+администратора не существует, `POST /api/auth/register` отсутствует как
+маршрут. Он **не совпадает** с историческим "Historical production smoke
+checklist" в README, зафиксированным на commit `7547704` (тот чеклист
+включает успешный `POST /api/auth/register` — маршрут, которого в текущем
+коде больше нет) — тот чеклист сохранён в README только как историческое
+свидетельство приёмки на тот момент, не как процедура для сегодняшнего
+деплоя.
+
+Подставьте `<домен>` = `vibe.elivcloud.org` для production; для локального
+стека (см. README, "Полный локальный стек") замените
+`https://<домен>` на `http://127.0.0.1:8000` и пропустите шаги, специфичные
+для Nginx/Registry (там их нет — override гасит эти сервисы).
+
+1. **Lifecycle one-shots завершены успешно:**
+   ```bash
+   docker compose ps --all
+   # db-roles-bootstrap / db-migrate / db-roles-finalize — Exited (0)
+   ```
+2. **Backend healthy / readiness:**
+   ```bash
+   docker compose ps backend        # healthy, RestartCount=0
+   docker compose exec backend python healthcheck.py && echo "backend ready"
+   ```
+3. **Публичный health endpoint:**
+   ```bash
+   curl -fsS https://<домен>/api/health   # 200
+   ```
+4. **Текущая модель bootstrap администратора (без публичной регистрации):**
+   ```bash
+   curl -fsS https://<домен>/api/auth/check
+   # {"admin_exists": false} на новой БД - поля "registration_allowed" в
+   # ответе нет и быть не должно (см. README, "First production admin")
+   ```
+   Если `admin_exists: false` — создать первого администратора ДО
+   публичного открытия сервиса на этой БД (см. "Первый администратор
+   (bootstrap)" выше):
+   ```bash
+   docker compose exec -it backend python -m app.cli bootstrap-admin
+   ```
+   `POST /api/auth/register` для этого использовать нельзя — маршрута нет
+   в коде вообще (`404`), это не альтернативный путь.
+5. **Login текущим auth-эндпоинтом:**
+   ```bash
+   curl -fsS -X POST https://<домен>/api/auth/login \
+     -H 'Content-Type: application/json' \
+     -d '{"username": "<имя>", "password": "<пароль>"}'
+   # 200, тело содержит JWT
+   ```
+6. **Representative protected admin request с JWT:**
+   ```bash
+   TOKEN=<значение из шага 5>
+   curl -fsS https://<домен>/api/auth/me -H "Authorization: Bearer $TOKEN"   # 200
+   curl -o /dev/null -s -w '%{http_code}\n' https://<домен>/api/auth/me     # без токена - 401
+   ```
+7. **Representative public application/service endpoint:**
+   ```bash
+   curl -fsS https://<домен>/api/admin-settings/active   # 200, публичный, без токена
+   ```
+8. **Frontend / SPA availability:**
+   ```bash
+   curl -o /dev/null -s -w '%{http_code}\n' https://<домен>/          # 200
+   curl -o /dev/null -s -w '%{http_code}\n' https://<домен>/admin     # 200, прямой refresh, не 404
+   ```
+9. **Nginx / публичный периметр** (только production, где Nginx поднят):
+   ```bash
+   curl -o /dev/null -s -w '%{http_code}\n' https://<домен>/docs         # 404
+   curl -o /dev/null -s -w '%{http_code}\n' https://<домен>/openapi.json # 404
+   curl -o /dev/null -s -w '%{http_code}\n' https://<домен>/redoc        # 404
+   curl -o /dev/null -s -w '%{http_code}\n' https://registry-vibe.elivcloud.org/v2/
+   # 401 с Basic auth challenge
+   ```
+10. **Итоговый статус контейнеров:**
+    ```bash
+    docker compose ps --all
+    # все долгоживущие сервисы - healthy/running, RestartCount=0;
+    # три one-shot lifecycle-сервиса - Exited (0)
+    ```
+
+Дополнительные protected-маршруты для расширенной проверки шага 6 (CRUD
+услуг, список/приоритизация заявок, аналитика) — README, "API и публичный
+security allowlist", раздел "Public/protected route matrix". Операционные
+проблемы после деплоя (сбой старта, недоступная БД, неудачная миграция,
+откат) — [RUNBOOK.md](RUNBOOK.md).
