@@ -1,0 +1,47 @@
+# docker-compose.local.yml
+#
+# Local-development override for vibe-order-infra - see README.md, "Локальная
+# разработка и тесты" and docs/DEPLOYMENT.md, "Три окружения". Does NOT
+# replace or weaken docker-compose.yml: a bare `docker compose up -d` (no
+# override file), as used in CI and on the production VPS, is completely
+# unaffected by this file's existence.
+#
+# Why this file exists: docker-compose.yml's default service set includes
+# nginx and registry, which on a clean clone cannot start - nginx bind-mounts
+# a real Let's Encrypt certificate from /etc/letsencrypt (host-only, VPS
+# artifact) and a built frontend/dist, and registry requires
+# registry/auth/htpasswd (created via registry/create-user.sh, never
+# committed). None of that exists for a reviewer who just cloned the repo,
+# so plain `docker compose up -d` cannot satisfy the "supported local stack"
+# claim on its own.
+#
+# This override keeps the same PostgreSQL lifecycle (postgres ->
+# db-roles-bootstrap -> db-migrate -> db-roles-finalize -> backend, all
+# unchanged from docker-compose.yml) but:
+#   - gates nginx/registry behind a "production" profile that nothing here
+#     activates, so a bare
+#       docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+#     skips them entirely and never touches their VPS-only bind mounts
+#     (pgadmin is already gated the same way in docker-compose.yml itself,
+#     via its own "admin" profile - unchanged here);
+#   - publishes backend on 127.0.0.1:8000 only (never 0.0.0.0 - see README,
+#     "UFW - не единственный механизм защиты" for why that distinction
+#     matters even for a local-only port), for a host-run Vite dev server
+#     (frontend/vite.config.ts already proxies /api to 127.0.0.1:8000) and
+#     manual curl/Postman checks to reach directly, since nginx isn't
+#     running locally to proxy it.
+#
+# The frontend itself is intentionally NOT containerized here: `npm run dev`
+# on the host already does the right thing against this backend (see
+# frontend/vite.config.ts's dev-only proxy).
+
+services:
+  nginx:
+    profiles: ["production"]
+
+  registry:
+    profiles: ["production"]
+
+  backend:
+    ports:
+      - "127.0.0.1:8000:8000"

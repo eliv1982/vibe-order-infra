@@ -47,27 +47,56 @@ host (backend, PostgreSQL, Registry сегодня так и сделаны, с�
 
 ## Статус проекта
 
-- **Инфраструктура**: `nginx:1.30.4-alpine`, `postgres:16.14-alpine` и
-  собственный образ `backend` — запущены на production VPS,
-  `RestartCount=0` у всех сервисов. `registry:3.1.1` запущен и работает (у
-  Registry по дизайну нет Docker-healthcheck, см. "Почему так" ниже;
-  `backend` начиная со Stage 3 — есть, см. "Backend healthcheck и
-  readiness"). `pgAdmin` запускается только через профиль `admin`, по
-  требованию. Watchtower удалён из инфраструктуры в Stage 3 (см. "Почему
-  так") — обновления образов теперь только явные, вручную.
+Этот раздел намеренно разделяет два разных факта, которые легко перепутать:
+что реально проверено вручную на живом production VPS, и что просто
+существует в текущем репозитории.
+
+**Последняя задокументированная ручная production-приемка на VPS** —
+commit `7547704` (см. "Финальная production-приемка" ниже). Все пункты
+подраздела "Последняя VPS-приемка" ниже описывают состояние именно на этот
+коммит, а не текущий HEAD.
+
+**Committed HEAD `95299dc`** продвинулся дальше на несколько стадий
+hardening (database lifecycle, публичный API, runtime/supply chain,
+CI/deployment operations — см. "Дальше по плану" ниже) без отдельной
+повторной ручной VPS-приемки, задокументированной в этом README. Поверх
+этого committed HEAD в репозитории также существует текущее проверенное
+состояние working tree после финального corrective pass (см. "Текущее
+репозиторное состояние" ниже) — оно не тождественно тому, что буквально
+зафиксировано в `95299dc`. Из содержимого репозитория не следует, какие
+именно изменения — ни закоммиченные на `95299dc`, ни более новые
+некоммиченные — фактически задеплоены на текущий VPS, поэтому подраздел
+"Текущее репозиторное состояние" ниже описывает только то, что верно для
+репозитория/working tree, без утверждений про VPS. Автоматических тестов
+это ограничение не касается: их результаты, приведенные в этом README,
+получены прогоном на текущем проверенном состоянии working tree
+(2026-09-05, см. "Локальная разработка и тесты"), независимо от статуса
+VPS-приемки.
+
+### Последняя VPS-приемка (commit `7547704`)
+
+- **Инфраструктура**: `postgres:16.14-alpine` и собственный образ
+  `backend` — запущены на production VPS, `RestartCount=0` у всех
+  сервисов. `registry` запущен и работает (у Registry по дизайну нет
+  Docker-healthcheck, см. "Почему так" ниже). `pgAdmin` запускается
+  только через профиль `admin`, по требованию. Watchtower на этот момент
+  ещё присутствовал в инфраструктуре в label-based opt-in режиме (ни один
+  сервис не был включен в автообновление, все label стояли в `"false"`) —
+  удалён позже, в Stage 3 (см. "Текущее репозиторное состояние" ниже).
 - **HTTPS**: Let's Encrypt сертификат на один SAN на оба домена
   (`vibe.elivcloud.org`, `registry-vibe.elivcloud.org`); `https://vibe.elivcloud.org`
-  отвечает `200`; HTTP редиректит на HTTPS, кроме ACME challenge и `/healthz`.
+  отвечает `200`; HTTP редиректит на HTTPS, кроме ACME challenge и
+  `/healthz`. HSTS на этот момент ещё не был включен — конфигурация Nginx
+  сознательно его не задавала (добавлен позже, в Stage 4, см. "Текущее
+  репозиторное состояние" ниже).
 - **Registry**: пользователь создан через `registry/create-user.sh`, полный
   push/pull smoke-test пройден (подробности — в разделе "Почему так");
   `GET /v2/` без credentials возвращает `401` с Basic auth challenge.
 - **PostgreSQL / pgAdmin**: 5432 наружу не публикуется; pgAdmin проверен
   через SSH-туннель и остановлен после проверки.
 - **Backend + frontend, включая административную панель, JWT-аутентификацию,
-  приоритизацию заявок и поведенческую аналитику**: реализованы, покрыты
-  тестами локально (backend suite на реальной PostgreSQL: **638 passed, 1
-  skipped**, frontend suite: **469 passed**) и **задеплоены на production
-  VPS**.
+  приоритизацию заявок и поведенческую аналитику**: реализованы и
+  **задеплоены на production VPS** по состоянию на commit `7547704`.
   Полная ручная production-приемка пройдена (см. "Ручная end-to-end
   приемка" ниже): регистрация первого администратора, повторные
   login/logout, CRUD услуг, публичная форма заявки, behavior metrics,
@@ -75,13 +104,39 @@ host (backend, PostgreSQL, Registry сегодня так и сделаны, с�
   поведенческая аналитика за 24 часа/7 дней/30 дней (включая состояния
   "метрики есть"/"метрики отсутствуют"), закрытые технические endpoints
   (`/docs`, `/redoc`, `/openapi.json`, неизвестные `/api/*`).
-- Первый администратор существует — `GET /api/auth/check` возвращает
-  `admin_exists: true` (поле `registration_allowed` в текущем API-контракте
-  отсутствует: публичной HTTP-регистрации администратора больше нет вообще
-  — см. "First production admin" ниже).
+- Первый администратор существует — `GET /api/auth/check` возвращал
+  `admin_exists: true` (поле `registration_allowed` на тот момент в ответе
+  ещё присутствовало — убрано позже вместе с удалением публичной
+  HTTP-регистрации, см. "First production admin" ниже).
 
-Не сделано осознанно (см. "Security notes / ограничения" ниже): HSTS,
-автоматизация продления сертификата.
+### Текущее репозиторное состояние (working tree после corrective pass)
+
+Ничего из перечисленного ниже не следует читать как "задеплоено на VPS" —
+только как текущее проверенное состояние working tree (2026-09-05) после
+финального corrective pass. Базовый committed HEAD перед этим corrective
+pass — `95299dc`; сам по себе `95299dc` перечисленные ниже
+corrective-изменения еще не содержит — они существуют только в текущем
+working tree.
+
+- **Инфраструктура**: `nginx:1.30.4-alpine`, `postgres:16.15-alpine`,
+  `registry:3.1.1` и собственный образ `backend` (точные версии и digest —
+  см. "Версии образов" ниже). `backend` начиная со Stage 3 имеет Docker
+  healthcheck (см. "Backend healthcheck и readiness"). Watchtower удалён
+  из инфраструктуры в Stage 3 (см. "Почему так") — обновления образов
+  теперь только явные, вручную.
+- **HSTS** включен (Stage 4) в текущей конфигурации Nginx — см. "Security
+  notes / ограничения" ниже за точной конфигурацией заголовка. На VPS-
+  приемке `7547704` (см. выше) HSTS ещё не был включен.
+- Backend + frontend покрыты тестами локально: backend suite на реальной
+  PostgreSQL — **650 passed, 0 skipped**, frontend suite — **469 passed**
+  (текущее проверенное состояние working tree, 2026-09-05 — см.
+  "Локальная разработка и тесты"/"CI"). Эти числа не описывают состояние на
+  момент VPS-приемки `7547704`, а также не обязательно совпадают с тем, что
+  дал бы прогон непосредственно на committed HEAD `95299dc` до corrective
+  pass.
+
+Не сделано осознанно (см. "Security notes / ограничения" ниже):
+автоматизация продления сертификата Let's Encrypt.
 
 ## Архитектура
 
@@ -149,6 +204,7 @@ mutable remote `latest` и не запрещал бы build-fallback.)
 ```
 vibe-order-infra/
 ├── docker-compose.yml
+├── docker-compose.local.yml # override для локальной разработки — см. "Полный локальный стек" ниже
 ├── .env.example
 ├── .gitignore
 ├── README.md
@@ -607,6 +663,108 @@ docker compose --env-file .env.example --profile admin config
 
 ## Локальная разработка и тесты
 
+### Полный локальный стек (Docker + Vite dev) — быстрый старт с чистого клона
+
+`docker-compose.yml` рассчитан на production VPS: `nginx` ждёт реальный
+Let's Encrypt сертификат из `/etc/letsencrypt`, собранный `frontend/dist` и
+`registry/auth/htpasswd`, которых на чистом клоне нет и быть не может. Для
+локальной разработки используется отдельный override-файл
+[docker-compose.local.yml](docker-compose.local.yml), который НЕ меняет
+`docker-compose.yml` (production/CI-поведение `docker compose up -d` без
+этого override — то же самое, что и раньше), а только:
+
+- гасит `nginx`/`registry` профилем `production`, который здесь никто не
+  активирует, — они не создаются вообще, и их VPS-only volume-мounты
+  (`/etc/letsencrypt`, `registry/auth`, `frontend/dist`) не трогаются;
+- публикует `backend` на `127.0.0.1:8000` (только loopback, никогда
+  `0.0.0.0` — см. "UFW — не единственный механизм защиты" выше), чтобы к
+  нему мог обратиться Vite dev-сервер, запущенный на хосте.
+
+Сам frontend в Docker не заворачивается: `frontend/vite.config.ts` уже
+содержит dev-only proxy `/api` -> `http://127.0.0.1:8000`, так что `npm run
+dev` на хосте обращается к контейнерному backend напрямую, тем же
+контрактом `/api/*`, что и production.
+
+**1. Предварительные требования:** Docker Engine + Compose plugin,
+Node.js 22. Production TLS-сертификаты, домены, Registry-креденшлы и
+`registry/auth/htpasswd` не нужны и не используются.
+
+**2. Настройка окружения:**
+
+```bash
+cp .env.example .env
+# Обязательно замените JWT_SECRET_KEY на реальный секрет — плейсхолдер
+# из .env.example намеренно отклоняется валидацией Settings при старте
+# backend (см. "Обязательные переменные окружения" выше):
+python -c "import secrets; print(secrets.token_urlsafe(64))"
+# Остальные значения (пароли ролей PostgreSQL, PGADMIN_*) можно оставить
+# как есть — это не production-секреты, а креденшлы одноразового локального
+# контейнера.
+```
+
+**3. База данных + backend:**
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+```
+
+Поднимает ровно ту же цепочку, что и в production (см. "Provisioning базы
+данных" в [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)): `postgres` (healthy)
+-> `db-roles-bootstrap` -> `db-migrate` -> `db-roles-finalize` -> `backend`
+(healthy). `nginx`/`registry` не создаются вообще (гашены override'ом
+выше); `pgadmin` по-прежнему опционален через `--profile admin`, если он
+нужен и локально.
+
+**4. Frontend:**
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+**5. URL'ы:** frontend — `http://localhost:5173`; backend напрямую —
+`http://127.0.0.1:8000` (включая `/docs`/`/redoc` — локально их никто не
+блокирует, в отличие от production-периметра Nginx, см. "API и публичный
+security allowlist" выше).
+
+**6. Проверка готовности:**
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml ps --all
+curl http://127.0.0.1:8000/api/health
+curl http://localhost:5173/api/admin-settings/active   # публичный эндпоинт через Vite proxy
+```
+
+Первая команда должна показать `backend`/`postgres` — `healthy`, три
+one-shot lifecycle-сервиса — `Exited (0)` (см. "Health / readiness" в
+DEPLOYMENT.md за тем, почему это ожидаемо, а не сбой). Первого
+администратора можно создать так же, как на VPS: `docker compose -f
+docker-compose.yml -f docker-compose.local.yml exec -it backend python -m
+app.cli bootstrap-admin`.
+
+**7. Остановка/очистка:**
+
+```bash
+# Ctrl+C у npm run dev, затем:
+docker compose -f docker-compose.yml -f docker-compose.local.yml down -v
+```
+
+(`-v` также удаляет volume `postgres-data` — для полностью чистого
+следующего старта; без `-v` данные между запусками сохраняются.)
+
+**8. Что осознанно НЕ используется локально:** production Nginx (TLS,
+security-заголовки, allowlist, SPA-раздача `frontend/dist`) — Vite dev
+сам раздаёт frontend и проксирует `/api`; Docker Registry — образ backend
+собирается локально (`build: ./backend`), а не тянется из приватного
+registry; pgAdmin — опционален, не требуется для базового сценария;
+реальные TLS-сертификаты, домены и htpasswd — не существуют локально и не
+нужны.
+
+Этот путь эмпирически проверен с чистого клона (Docker-стек поднят,
+`GET /api/health`/`GET /api/admin-settings/active` отвечали через
+контейнерный backend напрямую и через Vite-прокси на `:5173`).
+
 ### Backend
 
 ```bash
@@ -638,7 +796,12 @@ pytest
 
 Итог прогона против отдельной реальной PostgreSQL test-базы (включая auth,
 admin CRUD, приоритизацию заявок с поиском/фильтром по приоритету, и
-analytics): **638 passed, 1 skipped**.
+analytics), на текущем проверенном состоянии working tree после corrective
+pass (2026-09-05; базовый committed HEAD перед этим corrective pass —
+`95299dc`): **650 passed, 0 skipped**. Это результат конкретного прогона на
+конкретном состоянии кода, не гарантия на будущее — число меняется вместе с
+кодом, актуальное значение всегда можно получить самостоятельным прогоном
+выше.
 
 ### Frontend
 
@@ -662,7 +825,7 @@ npm audit
 GitHub Actions (`.github/workflows/ci.yml`), три независимых job'а на
 каждый push/PR в `main`:
 
-- **backend-tests** — полный `pytest` против реального `postgres:16.14-alpine`
+- **backend-tests** — полный `pytest` против реального `postgres:16.15-alpine`
   service-контейнера (не mock — те же интеграционные тесты, что и
   локально, включая Alembic fresh-install/legacy-upgrade/drift и реальный
   `pg_dump`/`pg_restore` round-trip), зависимости ставятся из
@@ -734,7 +897,16 @@ Nginx раздает `frontend/dist` через read-only bind mount
 
 ### Первый деплой (bootstrap)
 
-Этот порядок уже пройден на текущем VPS и остается здесь как процедура для
+Основные шаги этого порядка (создание `.env`, `registry/create-user.sh`,
+сборка/доставка release-образа, первый `docker compose up -d --no-build`)
+были пройдены на этом VPS при самом первом деплое, предшествовавшем
+задокументированной VPS-приемке на commit `7547704` (см. "Статус проекта"
+выше). Шаг 9 ниже в текущем виде репозитория дополнительно поднимает
+цепочку Stage 2 database lifecycle (`db-roles-bootstrap` → `db-migrate` →
+`db-roles-finalize`), появившуюся в репозитории позже `7547704` — из
+содержимого репозитория не следует, выполнялась ли именно эта цепочка на
+текущем VPS; она проверена локально/в CI (см. "Локальная разработка и
+тесты"/"CI"). Процедура ниже в целом остается здесь как инструкция для
 повторного/дополнительного bootstrap. Registry **не считается готовым к
 запуску** без файла `registry/auth/htpasswd` — до его появления контейнер
 стартует, но любой запрос к Registry будет отклонен на этапе аутентификации
@@ -1071,7 +1243,13 @@ docker compose exec -it backend python -m app.cli bootstrap-admin
 
 ## Ручная end-to-end приемка
 
-### Финальная production-приемка (текущий релиз, commit `7547704`)
+### Финальная production-приемка (по состоянию на commit `7547704`)
+
+Это последняя задокументированная в этом README ручная приемка на
+production VPS. Репозиторий с тех пор продвинулся дальше (см. "Статус
+проекта" выше и "Дальше по плану" ниже) — эта запись не переписывается
+под более новый HEAD, она фиксирует то, что было реально проверено на
+VPS на момент commit `7547704`.
 
 Выполнена вручную через публичный домен `https://vibe.elivcloud.org` после
 деплоя административной панели, JWT-аутентификации, приоритизации заявок и
@@ -1150,16 +1328,22 @@ Nginx, т.к. серверной auth еще не было):
   Nginx.
 
 Эта историческая запись **больше не описывает текущую Nginx-конфигурацию**:
-начиная с текущего релиза `/admin` и admin API публикуются (защищены JWT на
-уровне backend, а не 404 в Nginx) — см. "API и публичный security
-allowlist" выше и "Финальная production-приемка" выше для актуального
-smoke-test этой функциональности на VPS.
+начиная с деплоя административной панели и JWT-аутентификации,
+задокументированного в рамках VPS-приемки на commit `7547704` (см.
+"Финальная production-приемка" выше), `/admin` и admin API публикуются
+(защищены JWT на уровне backend, а не 404 в Nginx) — это же верно и для
+текущей конфигурации репозитория. См. "API и публичный security allowlist"
+выше и "Финальная production-приемка" выше для актуального smoke-test этой
+функциональности на VPS.
 
 ## Production smoke checklist
 
-Чеклист использован для деплоя и приемки текущего релиза на VPS. Все пункты
-подтверждены (актуальный read-only production-аудит — см. также
-"Финальная production-приемка" выше):
+Чеклист использован для деплоя и приемки релиза, зафиксированного как
+commit `7547704` — последняя задокументированная ручная VPS-приемка (см.
+"Статус проекта" выше). Все пункты ниже подтверждены на VPS по состоянию
+на тот момент (см. также "Финальная production-приемка" выше) — это не
+чеклист для текущего HEAD `95299dc`, который продвинулся дальше без
+отдельной повторной ручной VPS-приемки:
 
 Перед деплоем:
 
@@ -1241,9 +1425,11 @@ smoke-test этой функциональности на VPS.
 - PostgreSQL: содержимое таблицы `applications`.
 - PostgreSQL: содержимое таблицы `behavior_metrics`.
 
-Текущий релиз (admin-панель, JWT-auth, приоритизация заявок, analytics) —
-см. "Финальная production-приемка" выше для полного списка проверенных
-сценариев (регистрация первого администратора, login/logout, CRUD услуг,
+Релиз с admin-панелью, JWT-auth, приоритизацией заявок и analytics
+(зафиксирован как commit `7547704` — последняя задокументированная ручная
+VPS-приемка, см. "Статус проекта" выше) — см. "Финальная
+production-приемка" выше для полного списка проверенных сценариев
+(регистрация первого администратора, login/logout, CRUD услуг,
 список/приоритизация заявок, статистика 24 часа/7 дней/30 дней,
 detail-метрики заявки с состояниями "есть"/"отсутствуют").
 
@@ -1357,9 +1543,14 @@ DDL/мутаций. `/api/health` остается чистой liveness-про�
 (`proxy_http_version 1.1`, `proxy_request_buffering off`, увеличенные
 таймауты, заголовок `Docker-Distribution-Api-Version`, корректные
 `X-Forwarded-*`). `nginx/certs/` в репозитории — неиспользуемый пустой
-плейсхолдер (реальные сертификаты — из `/etc/letsencrypt` на хосте). HSTS
-сознательно **не включен** — его стоит добавлять отдельным шагом после
-более длительного периода стабильной работы HTTPS.
+плейсхолдер (реальные сертификаты — из `/etc/letsencrypt` на хосте). Всё
+перечисленное выше про сам TLS/сертификат подтверждено на VPS-приемке
+`7547704` (см. "Статус проекта" выше). HSTS — более позднее добавление в
+текущем репозитории (Stage 4, добавлен после `7547704`; отдельная ручная
+VPS-приемка этого изменения в README не задокументирована) и в текущей
+конфигурации включен на HTTPS-ответах основного сайта — см. "Security
+notes / ограничения" ниже за точной конфигурацией заголовка и
+обоснованием значений `max-age`/`includeSubDomains`/`preload`.
 
 **Nginx hardening.** `server_tokens off;` (не светить версию Nginx),
 `X-Content-Type-Options: nosniff` и `Referrer-Policy` добавлены во все
@@ -1417,24 +1608,26 @@ json-file` с `max-size: "10m"`, `max-file: "3"` — до ~30MB логов на
 
 | Сервис | Образ |
 |---|---|
-| postgres | `postgres:16.14-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777` |
+| postgres | `postgres:16.15-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685` |
 | pgadmin | `dpage/pgadmin4:9.16@sha256:40fa840c5bb7c8463957f1255b01283732c2d8c9396a956d180f8e6c296753b3` |
 | registry | `registry:3.1.1@sha256:1be55279f18a2fe1a74edf2664cac61c1bea305b7b4642dab412e7affdcb3e33` |
 | nginx | `nginx:1.30.4-alpine@sha256:dc5069ad14f19660b141b21236140b91656bf89bbc3e2417c70ae650cd66104c` |
-| backend | собственная сборка на базе `python:3.12.10-slim@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db` |
+| backend | собственная сборка на базе `python:3.12.14-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea` |
 
 Для `backend` — две разные, не противоречащие друг другу вещи:
 
 - **Compose declaration** (`docker-compose.yml`): `build: ./backend` — build
   context только для локальной разработки.
 - **Production delivery**: ни один production release, включая самый
-  первый, не собирается на VPS. Текущий production release доставлен через
-  private Registry — release image собран вне VPS для `linux/amd64` и
-  запушен с immutable tag в `registry-vibe.elivcloud.org`, на VPS выполнен
-  `docker pull` этого image, затем `docker tag` на локальный тег
-  `vibe-order-infra-backend:latest`, затем `docker compose up -d
-  --no-build` (см. "Порядок деплоя" ниже — этот же принцип применяется к
-  каждому будущему релизу backend). Самый первый деплой на этом VPS
+  первый, не собирается на VPS. Production release доставляется через
+  private Registry — release image собирается вне VPS для `linux/amd64` и
+  пушится с immutable tag в `registry-vibe.elivcloud.org`, на VPS
+  выполняется `docker pull` этого image, затем `docker tag` на локальный
+  тег `vibe-order-infra-backend:latest`, затем `docker compose up -d
+  --no-build` (см. "Порядок деплоя" ниже — тот же принцип применялся к
+  релизу, зафиксированному как commit `7547704` (последняя задокументированная
+  VPS-приемка, см. "Статус проекта" выше), и применяется к каждому
+  последующему релизу backend). Самый первый деплой на этом VPS
   использовал тот же принцип "образ собран вне VPS + детерминированный
   локальный тег + `--no-build`", но доставлял образ через `docker
   save`/`scp`/`docker load` вместо `docker pull`, поскольку Registry на тот
@@ -1447,7 +1640,10 @@ json-file` с `max-size: "10m"`, `max-file: "3"` — до ~30MB логов на
 
 ## Security notes / ограничения
 
-Текущее состояние:
+Текущее состояние (текущее проверенное состояние working tree после
+corrective pass; базовый committed HEAD перед этим corrective pass —
+`95299dc`; это не описание того, что именно сейчас развернуто на VPS сверх
+последней VPS-приемки на commit `7547704`, см. "Статус проекта" выше):
 
 - Admin-роут (frontend `/admin`) и admin CRUD (backend
   `/api/admin-settings/*` и т.д.) публикуются через Nginx и защищены JWT-
@@ -1558,10 +1754,14 @@ production по-прежнему выполняются оператором в�
 
 Bootstrap, HTTPS, Registry-smoke-test, backend/frontend (публичная форма,
 behavior metrics), административная панель, JWT-auth, приоритизация заявок
-и поведенческая аналитика — реализованы, покрыты тестами локально
-(backend: 638 passed, 1 skipped; frontend: 469 passed) и **задеплоены на
-production VPS**; полная ручная приемка пройдена (см. "Ручная end-to-end
-приемка").
+и поведенческая аналитика — реализованы; текущее проверенное состояние
+working tree после corrective pass (2026-09-05; базовый committed HEAD
+перед этим corrective pass — `95299dc`) покрыто тестами локально (backend:
+650 passed, 0 skipped; frontend: 469 passed — см. "Локальная разработка и
+тесты"/"CI"). Полная
+ручная production-приемка пройдена по состоянию на commit `7547704` (см.
+"Статус проекта" выше и "Ручная end-to-end приемка"); репозиторий с тех
+пор продвинулся дальше без отдельной повторной ручной VPS-приемки.
 Из содержательного остается:
 
 1. ~~Внедрить Alembic-миграции вместо `Base.metadata.create_all()`~~ —

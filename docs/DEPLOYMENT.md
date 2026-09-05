@@ -12,8 +12,8 @@
 
 | | Где | БД | Секреты | Как считается "готово" |
 |---|---|---|---|---|
-| **Локальная разработка** | ноутбук разработчика | локальный `postgres` контейнер (или `docker compose up`) | `.env`, сгенерированный локально, не коммитится | `pytest`/`npm test` проходят, `docker compose up -d` поднимает стек |
-| **CI** | GitHub Actions (`.github/workflows/ci.yml`) | одноразовый `postgres:16.14-alpine` service-контейнер, уничтожается после job'а | фиктивные, захардкоженные в workflow-файле (`postgres`/`postgres`), не секреты в смысле GitHub Secrets — база одноразовая и никогда не публикуется | все три job'а (`backend-tests`, `frontend`, `containers`) зелёные |
+| **Локальная разработка** | ноутбук разработчика | `postgres` контейнер, поднятый через `docker compose -f docker-compose.yml -f docker-compose.local.yml up -d` (см. README, "Полный локальный стек") | `.env`, сгенерированный локально, не коммитится | `pytest`/`npm test` проходят; `docker compose -f docker-compose.yml -f docker-compose.local.yml up -d` поднимает postgres+backend, `npm run dev` — frontend |
+| **CI** | GitHub Actions (`.github/workflows/ci.yml`) | одноразовый `postgres:16.15-alpine` service-контейнер, уничтожается после job'а | фиктивные, захардкоженные в workflow-файле (`postgres`/`postgres`), не секреты в смысле GitHub Secrets — база одноразовая и никогда не публикуется | все три job'а (`backend-tests`, `frontend`, `containers`) зелёные |
 | **Production** | Ubuntu 24.04 VPS (см. README, "Целевой сервер") | `postgres` контейнер с постоянным volume, порт наружу не публикуется | `.env` создаётся вручную на VPS, права `600`, никогда не в git | `docker compose ps` — все сервисы `healthy`/`running`, `GET /api/health` через HTTPS отвечает `200` |
 
 Repo не предоставляет Terraform/Ansible/Kubernetes-манифестов — production
@@ -125,6 +125,15 @@ docker compose up -d --no-build
 собранного тега Compose соберет образ сам за счет `build: ./backend`,
 именно поэтому этот флаг в описании "Три окружения" выше не указан для
 локальной разработки.)
+
+Локально также не поднимаются `nginx`/`registry` — для чистого клона без
+production TLS-сертификата/Registry-креденшлов используется отдельный
+override [docker-compose.local.yml](../docker-compose.local.yml):
+`docker compose -f docker-compose.yml -f docker-compose.local.yml up -d`
+(полная процедура, включая frontend, — README, "Полный локальный стек").
+Цепочка postgres -> roles -> migrate -> roles -> backend ниже — общая для
+production и для этого локального override: он меняет только набор
+запускаемых сервисов и публикацию порта backend, не сам lifecycle.
 
 Это поднимает всё автоматически в правильном порядке — зависимости между
 сервисами объявлены через `depends_on: condition:

@@ -1,11 +1,11 @@
 /**
  * Minimal pathname-based SPA router — no external routing library.
  *
- * Distinguishes "/" (home) from "/admin". Nginx currently only serves a
- * static placeholder for "/", so once the built dist/ is wired up, a
- * SPA-fallback rule (try_files ... /index.html) will be needed for
- * "/admin" to work on a hard refresh — this router assumes that fallback
- * exists but does not configure it (Nginx is out of scope here).
+ * Distinguishes "/" (home) from "/admin". Nginx serves the built dist/ with
+ * a SPA-fallback rule (try_files ... /index.html, see
+ * nginx/conf.d/vibe.elivcloud.org.conf) so "/admin" also works on a hard
+ * refresh — this router assumes that fallback exists but does not
+ * configure it (Nginx is out of scope here).
  *
  * Backend/technical paths (/api/*, /docs, /openapi.json, /redoc) must
  * never be mistaken for the homepage — if the router is ever asked to

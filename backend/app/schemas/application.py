@@ -198,7 +198,8 @@ class ApplicationRead(BaseModel):
     task_type: str
     # Nullable: a historical row from a database upgraded from the accepted
     # Stage 1A baseline has no service to point at (see
-    # app/core/schema_compat.py and app/models/application.py). Every row
+    # backend/alembic/versions/0003_stage1b_service_idemp.py and
+    # app/models/application.py). Every row
     # created through Stage 1B's POST /applications always has a real,
     # FK-backed value here - see ApplicationCreate.service_id below.
     service_id: int | None

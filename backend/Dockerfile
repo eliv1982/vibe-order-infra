@@ -1,16 +1,21 @@
-# Stage 3: базовый образ закреплён и по точной patch-версии (3.12.10 —
+# Stage 3: базовый образ закреплён и по точной patch-версии (3.12.14 —
 # совпадает с локальным baseline из pyproject.toml/requires-python), и по
 # immutable digest — это digest самого manifest list (image index), а не
 # отдельного per-platform manifest (проверено: `docker buildx imagetools
-# inspect python:3.12.10-slim` показывает MediaType
+# inspect python:3.12.14-slim` показывает MediaType
 # application/vnd.oci.image.index.v1+json с несколькими Platform-записями,
 # включая linux/amd64 — то, что реально используется в проде). Поэтому
 # `docker pull`/`docker build` по этому digest продолжает резолвиться в
 # правильный образ под текущую архитектуру, а не ломает мультиплатформенность.
-# Тег (`3.12.10-slim`) оставлен рядом с digest намеренно — он документирует,
+# Тег (`3.12.14-slim`) оставлен рядом с digest намеренно — он документирует,
 # какая это версия, для человека; digest гарантирует, что под этим тегом
 # впоследствии не подменят содержимое молча.
-FROM python:3.12.10-slim@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db
+#
+# Патч-апдейт 3.12.10 -> 3.12.14 (актуальный security patch level на момент
+# проверки) — только версия базового образа/digest, зависимости и код без
+# изменений; digest переверифицирован тем же `docker buildx imagetools
+# inspect` перед обновлением этой строки.
+FROM python:3.12.14-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
 
 WORKDIR /app
 

@@ -15,7 +15,7 @@ services:
   # ------------------------------------------------------------------
   # PostgreSQL — база данных заявок.
   # Порт 5432 НЕ публикуется на host: доступ только изнутри app-net
-  # (pgAdmin и в будущем backend обращаются к сервису по имени "postgres").
+  # (pgAdmin и backend обращаются к сервису по имени "postgres").
   # ------------------------------------------------------------------
   postgres:
     # Stage 3: закреплён и по точной версии, и по immutable digest — это
@@ -25,7 +25,10 @@ services:
     # digest продолжает резолвиться в правильный образ под текущую
     # архитектуру. Тег рядом с digest — для человека; digest гарантирует,
     # что под этим тегом впоследствии не подменят содержимое молча.
-    image: postgres:16.14-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    # Патч-апдейт 16.14 -> 16.15 (актуальный security patch level на момент
+    # проверки) — digest переверифицирован тем же `docker buildx imagetools
+    # inspect` перед обновлением этой строки.
+    image: postgres:16.15-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
     restart: unless-stopped
     # Stage 4: `no-new-privileges` blocks a process from gaining more
     # privileges than it started with (e.g. via a setuid/setgid binary) -
@@ -131,8 +134,8 @@ services:
   # ------------------------------------------------------------------
   # Docker Registry — приватный реестр образов.
   # Порт 5000 НЕ публикуется на host. Доступен Nginx внутри proxy-net.
-  # Внешний доступ в будущем — только через Nginx по HTTPS
-  # (registry-vibe.elivcloud.org). Basic Auth обеспечивается самим
+  # Внешний доступ — только через Nginx по HTTPS
+  # (registry-vibe.elivcloud.org, см. nginx/conf.d). Basic Auth обеспечивается самим
   # Registry через htpasswd. Registry НЕ считается готовым к запуску,
   # пока registry/auth/htpasswd не создан через registry/create-user.sh
   # (см. README, "Порядок первого деплоя") — без него контейнер
@@ -188,14 +191,14 @@ services:
   # ------------------------------------------------------------------
   # Nginx — единственный публичный сервис (80/443).
   # HTTPS-блоки для vibe.elivcloud.org и registry-vibe.elivcloud.org
-  # активированы в конфигурации (сертификат Let's Encrypt уже выпущен
-  # на VPS и монтируется из /etc/letsencrypt, см. volumes ниже) — но
-  # реальный serverside smoke-test (docker compose up + curl с VPS)
-  # ещё не проводился в рамках этой сессии. HTTP (80) отдаёт ACME
-  # challenge и редиректит остальной трафик на HTTPS для обоих
-  # доменов. Registry проксируется только по HTTPS. Backend всё ещё
-  # отсутствует, поэтому у vibe.elivcloud.org на 443 — тот же
-  # безопасный placeholder, что и был на HTTP.
+  # активны в конфигурации (сертификат Let's Encrypt выпущен на VPS и
+  # монтируется из /etc/letsencrypt, см. volumes ниже) и подтверждены
+  # реальным serverside smoke-test'ом на публичном домене (см. README,
+  # "Production smoke checklist" и "Ручная end-to-end приемка"). HTTP (80)
+  # отдаёт ACME challenge и редиректит остальной трафик на HTTPS для обоих
+  # доменов. Registry проксируется только по HTTPS. Backend на 443
+  # проксируется через allowlist `/api/*` (см. nginx/conf.d), статика
+  # `frontend/dist` отдаётся тем же server{} блоком с SPA fallback.
   # ------------------------------------------------------------------
   nginx:
     # Stage 3: закреплён по версии и immutable manifest-list digest — см.
@@ -522,7 +525,7 @@ networks:
   # Registry внутри этой сети доступен Nginx, но не публикуется на host.
   proxy-net:
     driver: bridge
-  # Внутренняя сеть приложения: PostgreSQL + pgAdmin (+ будущий backend).
+  # Внутренняя сеть приложения: PostgreSQL + backend + pgAdmin.
   # Не имеет точки входа снаружи, кроме опционального loopback-порта pgAdmin.
   app-net:
     driver: bridge

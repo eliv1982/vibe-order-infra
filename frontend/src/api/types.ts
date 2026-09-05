@@ -83,7 +83,8 @@ export interface ApplicationRead {
   task_type: string;
   // Nullable: a historical row from a database upgraded from the pre-
   // Stage-1B baseline has no service to point at (see
-  // backend/app/core/schema_compat.py) - every row created through
+  // backend/app/models/application.py's docstring and
+  // backend/app/db_admin/adopt_legacy.py) - every row created through
   // Stage 1B's POST /applications always has a real value here.
   service_id: number | null;
   interested_product: string;
