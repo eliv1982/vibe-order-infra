@@ -7,8 +7,9 @@ CI, production VPS) и для чеклиста приёмки после деп�
 backend, полный порядок первого деплоя) пока остаются в README, "Порядок
 деплоя" — этот файл на них ссылается, а не дублирует их. Архитектура,
 границы доверия и ролевая модель БД — в [ARCHITECTURE.md](ARCHITECTURE.md);
-security-инварианты, полная API allowlist-матрица и историческая (commit
-`7761901`) production-приемка — в [README.md](../README.md). Операционные
+security-инварианты, полная API allowlist-матрица, актуальная (2026-09-12,
+commit `9b06ad6`) и историческая (commit `7761901`) production-приемка —
+в [README.md](../README.md). Операционные
 события после деплоя (сбой старта, восстановление из backup, ротация
 секретов и т.п.) — в [RUNBOOK.md](RUNBOOK.md).
 
@@ -237,6 +238,21 @@ legacy baseline-ревизию (`0001_legacy_baseline`). Идемпотентн�
 База, чья форма хоть немного отличается от ожидаемого legacy-фингерпринта,
 **отклоняется**, а не "усыновляется по-хорошему" — не гадает.
 
+### Проверка процедуры усыновления legacy-базы (2026-09-12)
+
+Процедура выше (роли → `adopt_legacy` → миграция → финализация) проверена
+не только тестами, но и один раз вживую — против реальной копии прежней
+production-базы (перенесённой с прежнего VPS в рамках инфраструктурной
+миграции), в полностью изолированном одноразовом окружении: отдельная
+PostgreSQL 16.15, отдельная Docker-сеть, отдельный volume, без публикации
+порта на host — production-база и production volume в этой репетиции не
+участвовали и не изменялись. `pg_dump`/контрольная сумма, усыновление,
+`alembic upgrade head` до текущей head-ревизии и least-privilege проверка
+runtime-роли прошли успешно, с исходными счётчиками строк без изменений.
+Изолированные контейнер/сеть/volume удалены после проверки. Полная
+детализация — README, раздел "Статус проекта" → "Проверка
+legacy-миграции", операционная evidence-запись — [RUNBOOK.md](RUNBOOK.md).
+
 ## Процедура миграций
 
 Новая ревизия схемы добавляется как обычный Alembic-файл в
@@ -316,13 +332,16 @@ image.
   только Docker `HEALTHCHECK` (`backend/healthcheck.py`,
   `backend/Dockerfile`) и локальные операторы изнутри `app-net`.
 - Docker-уровень: `docker compose ps` — все долгоживущие сервисы
-  `healthy`/`running`, `RestartCount=0`. one-shot DB-lifecycle сервисы —
-  `Exited (0)`, это ожидаемое конечное состояние, не ошибка (их собственный
-  `HEALTHCHECK` осознанно отключён, см. `docker-compose.yml`'s комментарий у
-  `db-roles-bootstrap`) — **но чтобы их увидеть, нужен `docker compose ps
-  --all`**: обычный `ps` по умолчанию скрывает остановленные контейнеры
-  (включая эти три), так что без `--all` они просто отсутствуют в выводе,
-  а не показываются как `Exited (0)`.
+  `healthy`/`running`. `docker compose ps` **не показывает `RestartCount`**
+  (такой колонки в его выводе нет) — отсутствие рестартов проверяется
+  отдельно, через `docker inspect -f '{{.RestartCount}}' <container>` (см.
+  "Текущий чеклист приёмки после деплоя" ниже). one-shot DB-lifecycle
+  сервисы — `Exited (0)`, это ожидаемое конечное состояние, не ошибка (их
+  собственный `HEALTHCHECK` осознанно отключён, см. `docker-compose.yml`'s
+  комментарий у `db-roles-bootstrap`) — **но чтобы их увидеть, нужен
+  `docker compose ps --all`**: обычный `ps` по умолчанию скрывает
+  остановленные контейнеры (включая эти три), так что без `--all` они
+  просто отсутствуют в выводе, а не показываются как `Exited (0)`.
 
 Минимальный технический health-check (быстрая проверка, не полная
 приёмка):
@@ -345,13 +364,23 @@ TLS **не выпускается и не автоматизируется эт�
 Let's Encrypt выпускается на VPS отдельно (`certbot`, вне docker-compose
 стека) и монтируется в Nginx read-only напрямую с хоста
 (`/etc/letsencrypt:/etc/letsencrypt:ro`, см. `docker-compose.yml`). Полная
-процедура выпуска (ACME HTTP-01 через `nginx/acme-challenge`) и
-обоснование, почему автопродление сертификата пока не автоматизировано —
-см. README, разделы "Nginx"/"Почему так"/"Дальше по плану". Reverse-proxy
-(Nginx) — единственный сервис, публикующий порты на все интерфейсы; вся
-API allowlist-логика, security-заголовки (HSTS/CSP/X-Frame-Options) и
-rate-limiting уже настроены в `nginx/conf.d/` и подробно задокументированы
-в README — этот файл их не дублирует.
+процедура первичного выпуска (ACME HTTP-01 через `nginx/acme-challenge`) —
+см. README, разделы "Nginx"/"Почему так".
+
+**Автопродление (текущий production VPS, вне этого репозитория).**
+Настроено и проверено на хосте: `certbot.timer` (systemd), webroot-
+аутентификатор через `nginx/acme-challenge`, deploy hook, который
+проверяет конфигурацию Nginx (`nginx -t`) и делает graceful reload только
+при успешной проверке. `certbot renew --dry-run --run-deploy-hooks`
+пройден успешно (2026-09-12, см. README, "Статус проекта" → "Текущая
+production-приемка"). Это операционная настройка хоста, а не
+Ansible/Terraform-манифест в этом репозитории — сам репозиторий по-
+прежнему не содержит и не устанавливает эту автоматизацию.
+
+Reverse-proxy (Nginx) — единственный сервис, публикующий порты на все
+интерфейсы; вся API allowlist-логика, security-заголовки
+(HSTS/CSP/X-Frame-Options) и rate-limiting уже настроены в `nginx/conf.d/`
+и подробно задокументированы в README — этот файл их не дублирует.
 
 ## Обновление / перезапуск (production)
 
@@ -415,7 +444,8 @@ checklist" в README, зафиксированным на commit `7761901` (то
    ```
 2. **Backend healthy / readiness:**
    ```bash
-   docker compose ps backend        # healthy, RestartCount=0
+   docker compose ps backend        # healthy/running (ps не показывает RestartCount)
+   docker inspect -f '{{.RestartCount}}' "$(docker compose ps -q backend)"   # ожидается 0
    docker compose exec backend python healthcheck.py && echo "backend ready"
    ```
 3. **Публичный health endpoint:**
@@ -463,14 +493,24 @@ checklist" в README, зафиксированным на commit `7761901` (то
    curl -o /dev/null -s -w '%{http_code}\n' https://<домен>/docs         # 404
    curl -o /dev/null -s -w '%{http_code}\n' https://<домен>/openapi.json # 404
    curl -o /dev/null -s -w '%{http_code}\n' https://<домен>/redoc        # 404
-   curl -o /dev/null -s -w '%{http_code}\n' https://registry-vibe.elivcloud.org/v2/
-   # 401 с Basic auth challenge
+   curl -sS -D - -o /dev/null https://registry-vibe.elivcloud.org/v2/
+   # ожидается статус 401 и заголовок ответа `WWW-Authenticate: Basic ...`
+   # (команда печатает заголовки ответа, а не только код — только так
+   # действительно проверяется Basic auth challenge, не только статус)
    ```
 10. **Итоговый статус контейнеров:**
     ```bash
     docker compose ps --all
-    # все долгоживущие сервисы - healthy/running, RestartCount=0;
+    # все долгоживущие сервисы - healthy/running;
     # три one-shot lifecycle-сервиса - Exited (0)
+
+    # "docker compose ps" не показывает RestartCount - проверяется отдельно,
+    # по каждому долгоживущему сервису:
+    for svc in postgres backend nginx registry; do
+      printf '%s: ' "$svc"
+      docker inspect -f '{{.RestartCount}}' "$(docker compose ps -q "$svc")"
+    done
+    # ожидается 0 для каждого сервиса
     ```
 
 Дополнительные protected-маршруты для расширенной проверки шага 6 (CRUD
